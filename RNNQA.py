@@ -65,13 +65,13 @@ class QA_Model():
                                                  + sent
                                                  for sent in par['context']] \
                                                 + [[0 for _ in range(self.config.num_steps)]
-                                                   for _ in range(self.num_context - len(par['context']))]),
+                                                   for _ in range(self.config.num_context - len(par['context']))]),
                             'questions': np.array([[0 for _ in range(self.config.num_steps - len(question['question']))] \
                                                    + question['question'] for question in par['qas']] \
                                                   + [[0 for _ in range(self.config.num_steps)]
-                                                     for _ in range(self.num_questions - len(par['qas']))]),
+                                                     for _ in range(self.config.num_questions - len(par['qas']))]),
                             'answers': np.array([question['answer'] for question in par['qas']] \
-                                                + [0 for _ in range(self.num_questions - len(par['qas']))])
+                                                + [0 for _ in range(self.config.num_questions - len(par['qas']))])
                            } for par in dataset]
         return encoded_dataset
 
