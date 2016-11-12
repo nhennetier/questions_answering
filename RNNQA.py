@@ -392,6 +392,12 @@ def test_RNNLM():
                 train_op=model.train_step)
             print('Training perplexity: {}'.format(train_pp))
             print('Training accuracy: {}'.format(train_accuracy))
+
+            valid_pp, valid_accuracy = model.run_epoch(
+                session, model.encoded_valid)
+            print('Validation perplexity: {}'.format(valid_pp))
+            print('Validation accuracy: {}'.format(valid_accuracy))
+
             if valid_pp < best_val_pp:
                 best_val_pp = valid_pp
                 best_val_epoch = epoch
@@ -400,12 +406,7 @@ def test_RNNLM():
                 break
             print('Total time: {}'.format(time.time() - start))
         
-        saver.restore(session, 'ptb_rnnlm.weights')
-        valid_pp, valid_accuracy = model.run_epoch(
-            session, model.encoded_valid)
-        print('Validation perplexity: {}'.format(valid_pp))
-        print('Validation accuracy: {}'.format(valid_accuracy))
-            
+        saver.restore(session, 'ptb_rnnlm.weights')    
         test_pp, test_accuracy = model.run_epoch(
             session, model.encoded_test)
         print('=-=' * 5)
