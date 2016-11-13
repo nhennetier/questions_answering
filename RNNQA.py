@@ -101,21 +101,21 @@ class QA_Model():
         self.vocab.construct(words_train + words_dev)
 
         self.encoded_train = self.encode_dataset(dataset_train)
-        self.encoded_dev = self.encode_dataset(dataset_dev)
+        self.encoded_valid = self.encode_dataset(dataset_dev)
 
         self.config.num_steps = max(self.max_size_sent(self.encoded_train),
-                             self.max_size_sent(self.encoded_dev))
+                             self.max_size_sent(self.encoded_valid))
         self.config.num_context = max(self.max_len_context(self.encoded_train),
-                               self.max_len_context(self.encoded_dev))
+                               self.max_len_context(self.encoded_valid))
         self.config.num_questions = max(self.max_len_questions(self.encoded_train),
-                                 self.max_len_questions(self.encoded_dev))
+                                 self.max_len_questions(self.encoded_valid))
 
         self.encoded_train = self.reencode_dataset(self.encoded_train)
-        self.encoded_dev = self.reencode_dataset(self.encoded_dev)
+        self.encoded_valid = self.reencode_dataset(self.encoded_valid)
         
-        n = floor(len(self.encoded_dev)/2)
-        self.encoded_test = self.encoded_dev[n:]
-        self.encoded_dev = self.encoded_dev[:n]
+        n = floor(len(self.encoded_valid)/2)
+        self.encoded_test = self.encoded_valid[n:]
+        self.encoded_valid = self.encoded_valid[:n]
 
 
 class RNNContext_Model(QA_Model):
