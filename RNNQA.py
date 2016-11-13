@@ -26,7 +26,6 @@ class Config(object):
     max_epochs = 16
     early_stopping = 2
     lr = 0.001
-    training_rate = 0.6
   
 
 class QA_Model():
@@ -89,9 +88,9 @@ class QA_Model():
         
     def load_data(self, debug=False):
         """Loads starter word-vectors and train/dev/test data."""
-        with open('/Users/nicolashennetier/Desktop/Stanford/Deep Learning and Natural Language Processing/Final Project/data/train.json') as data_file:
+        with open('./data/train.json') as data_file:
             train = json.load(data_file)
-        with open('/Users/nicolashennetier/Desktop/Stanford/Deep Learning and Natural Language Processing/Final Project/data/dev.json') as data_file:
+        with open('./data/dev.json') as data_file:
             dev = json.load(data_file)
 
         words_train, dataset_train = self.preprocess(train)
