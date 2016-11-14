@@ -21,7 +21,7 @@ class Config(object):
     information parameters. Model objects are passed a Config() object at
     instantiation.
     """
-    embed_size = 50
+    embed_size = 300
     hidden_size = 100
     max_epochs = 16
     early_stopping = 2
@@ -99,6 +99,21 @@ class QA_Model():
         self.vocab = Vocab()
         self.vocab.construct(words_train + words_dev)
 
+        glove_vecs = {}
+        with open('./data/glove.840B.300d.txt') as glove_file:
+            for line in glove_file:
+                vec = line.split()
+                if len(vec) == 301 and vec[0] in self.vocab.word_to_index.keys():
+                    glove_vecs[vec[0]] = [float(x) for x in vec[1:]]
+
+        self.embeddings = np.zeros((len(self.vocab), 300))
+        for ind, word in self.vocab.index_to_word.items():
+            try:
+                self.embeddings[ind,:] = glove_vecs[word]
+            except:
+                self.embeddings[ind,:] = np.zeros(300)
+        self.embeddings = self.embeddings.astype(np.float32)
+
         self.encoded_train = self.encode_dataset(dataset_train)
         self.encoded_valid = self.encode_dataset(dataset_dev)
 
@@ -151,13 +166,10 @@ class RNNContext_Model(QA_Model):
         """
         # The embedding lookup is currently only implemented for the CPU
         with tf.device('/cpu:0'):
-            embeddings = tf.get_variable('Embedding',
-                                         [len(self.vocab), self.config.embed_size],
-                                         trainable=True)
-            embed_context = tf.nn.embedding_lookup(embeddings,
+            embed_context = tf.nn.embedding_lookup(self.embeddings,
                                                    self.context_placeholder)
             context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.num_steps, embed_context)]
-            embed_questions = tf.nn.embedding_lookup(embeddings,
+            embed_questions = tf.nn.embedding_lookup(self.embeddings,
                                                    self.questions_placeholder)
             questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.num_steps, embed_questions)]
           
