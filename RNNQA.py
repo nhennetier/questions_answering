@@ -4,14 +4,12 @@ import time
 import json
 
 import numpy as np
-from copy import deepcopy
 from math import floor
 from nltk.tokenize import sent_tokenize, word_tokenize
 
-from utils import calculate_perplexity, Vocab, sample
+from utils import Vocab
 
 import tensorflow as tf
-from tensorflow.python.ops.seq2seq import sequence_loss
 
 
 class Config(object):
@@ -217,11 +215,12 @@ class RNNContext_Model(QA_Model):
         Returns:
           loss: A 0-d tensor (scalar)
         """
-        all_ones = [tf.ones([tf.shape(output)[0]])]
-        cross_entropy = sequence_loss([output],
-            [self.answers_placeholder],
-            all_ones,
-            len(self.vocab))
+        labels = tf.one_hot(self.answers_placeholder,
+            len(self.vocab),
+            on_value=1,
+            off_value=0,
+            axis=-1)
+        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(output, labels))
         tf.add_to_collection('total_loss', cross_entropy)
         loss = tf.add_n(tf.get_collection('total_loss'))
 
@@ -376,11 +375,11 @@ class RNNContext_Model(QA_Model):
             num_answers += len(answers)
             if verbose and step % verbose == 0:
                 sys.stdout.write('\r{} / {} : pp = {}'.format(
-                    step, total_steps, np.exp(np.mean(total_loss))))
+                    step, total_steps, np.mean(total_loss)))
                 sys.stdout.flush()
         if verbose:
             sys.stdout.write('\r')
-        return np.exp(np.mean(total_loss)), pos_preds / num_answers
+        return np.mean(total_loss), pos_preds / num_answers
 
 def test_RNNLM():
     config = Config()
@@ -391,26 +390,26 @@ def test_RNNLM():
     saver = tf.train.Saver()
 
     with tf.Session() as session:
-        best_val_pp = float('inf')
+        best_val_ce = float('inf')
         best_val_epoch = 0
     
         session.run(init)
         for epoch in range(config.max_epochs):
             print('Epoch {}'.format(epoch))
             start = time.time()
-            train_pp, train_accuracy = model.run_epoch(
+            train_ce, train_accuracy = model.run_epoch(
                 session, model.encoded_train,
                 train_op=model.train_step)
-            print('Training perplexity: {}'.format(train_pp))
+            print('Training cross-entropy: {}'.format(train_ce))
             print('Training accuracy: {}'.format(train_accuracy))
 
-            valid_pp, valid_accuracy = model.run_epoch(
+            valid_ce, valid_accuracy = model.run_epoch(
                 session, model.encoded_valid)
-            print('Validation perplexity: {}'.format(valid_pp))
+            print('Validation cross-entropy: {}'.format(valid_ce))
             print('Validation accuracy: {}'.format(valid_accuracy))
 
-            if valid_pp < best_val_pp:
-                best_val_pp = valid_pp
+            if valid_ce < best_val_ce:
+                best_val_ce = valid_ce
                 best_val_epoch = epoch
                 saver.save(session, './ptb_rnnlm.weights')
             if epoch - best_val_epoch > config.early_stopping:
@@ -418,10 +417,10 @@ def test_RNNLM():
             print('Total time: {}'.format(time.time() - start))
         
         saver.restore(session, 'ptb_rnnlm.weights')    
-        test_pp, test_accuracy = model.run_epoch(
+        test_ce, test_accuracy = model.run_epoch(
             session, model.encoded_test)
         print('=-=' * 5)
-        print('Test perplexity: {}'.format(test_pp))
+        print('Test cross-entropy: {}'.format(test_ce))
         print('Test accuracy: {}'.format(test_accuracy))
         print('=-=' * 5)
 
