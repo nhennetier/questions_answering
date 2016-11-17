@@ -1,3 +1,5 @@
 *.pyc
 checkpoint
 *.weights*
+*.txt
+*.ipynb
