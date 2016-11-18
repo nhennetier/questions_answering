@@ -20,6 +20,7 @@ class Config(object):
     instantiation.
     """
     embed_size = 300
+    pretrained_embed = False
     hidden_size = 100
     max_epochs = 16
     early_stopping = 2
@@ -65,11 +66,11 @@ class QA_Model():
     def reencode_dataset(self, dataset):
         encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.len_sent_context)]
                                                  for _ in range(self.config.len_context - len(par['context']))] \
-                                                + [sent + [0 for _ in range(self.config.len_sent_context - len(sent))]
+                                                + [[0 for _ in range(self.config.len_sent_context - len(sent))] + sent
                                                    for sent in par['context']]),
                             'questions': np.array([[0 for _ in range(self.config.len_sent_questions)]
                                                    for _ in range(self.config.len_questions - len(par['questions']))] \
-                                                  + [sent + [0 for _ in range(self.config.len_sent_questions - len(sent))] \
+                                                  + [[0 for _ in range(self.config.len_sent_questions - len(sent))] + sent
                                                      for sent in par['questions']]),
                             'answers': np.array([0 for _ in range(self.config.len_questions - len(par['answers']))] + par['answers'])
                            } for par in dataset]
@@ -175,11 +176,15 @@ class RNNContext_Model(QA_Model):
         """
         # The embedding lookup is currently only implemented for the CPU
         with tf.device('/cpu:0'):
+            if not self.config.pretrained_embed:
+                self.embeddings = tf.get_variable('Embedding',
+                                                  [len(self.vocab), self.config.embed_size],
+                                                  trainable=True)
             embed_context = tf.nn.embedding_lookup(self.embeddings,
                                                    self.context_placeholder)
-            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_context, embed_context)]
             embed_questions = tf.nn.embedding_lookup(self.embeddings,
                                                      self.questions_placeholder)
+            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_context, embed_context)]
             questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_questions, embed_questions)]
           
         return context, questions
