@@ -4,14 +4,12 @@ import time
 import json
 
 import numpy as np
-from copy import deepcopy
 from math import floor
 from nltk.tokenize import sent_tokenize, word_tokenize
 
-from utils import calculate_perplexity, Vocab, sample
+from utils import Vocab
 
 import tensorflow as tf
-from tensorflow.python.ops.seq2seq import sequence_loss
 
 
 class Config(object):
@@ -21,12 +19,12 @@ class Config(object):
     information parameters. Model objects are passed a Config() object at
     instantiation.
     """
-    embed_size = 50
+    embed_size = 300
+    pretrained_embed = False
     hidden_size = 100
     max_epochs = 16
     early_stopping = 2
     lr = 0.001
-    training_rate = 0.6
   
 
 class QA_Model():
@@ -50,48 +48,57 @@ class QA_Model():
         return words, dataset
 
     def encode_dataset(self, dataset):
-        encoded_dataset = [{'context': [[self.vocab.encode(word.lower()) 
-                                         for word in sent]
-                                        for sent in par['context']],
-                            'qas': [{'question': [self.vocab.encode(word.lower()) 
-                                                  for word in question['question']],
-                                     'answer': self.vocab.encode(question['answer'].lower())
-                                    } for question in par['qas']]}
+        encoded_dataset = [{'context': sorted([[self.vocab.encode(word.lower()) 
+                                                for word in sent]
+                                               for sent in par['context']],
+                                              key=len,
+                                              reverse=True),
+                            'questions': sorted([[self.vocab.encode(word.lower()) 
+                                                  for word in question['question']]
+                                                 for question in par['qas']],
+                                                 key=len,
+                                                 reverse=True),
+                            'answers': [self.vocab.encode(question['answer'].lower())
+                                        for question in par['qas']]}
                            for par in dataset]
         return encoded_dataset
 
     def reencode_dataset(self, dataset):
-        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.num_steps - len(sent))] \
-                                                 + sent
-                                                 for sent in par['context']] \
-                                                + [[0 for _ in range(self.config.num_steps)]
-                                                   for _ in range(self.config.num_context - len(par['context']))]),
-                            'questions': np.array([[0 for _ in range(self.config.num_steps - len(question['question']))] \
-                                                   + question['question'] for question in par['qas']] \
-                                                  + [[0 for _ in range(self.config.num_steps)]
-                                                     for _ in range(self.config.num_questions - len(par['qas']))]),
-                            'answers': np.array([question['answer'] for question in par['qas']] \
-                                                + [0 for _ in range(self.config.num_questions - len(par['qas']))])
+        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.len_sent_context)]
+                                                 for _ in range(self.config.len_context - len(par['context']))] \
+                                                + [[0 for _ in range(self.config.len_sent_context - len(sent))] + sent
+                                                   for sent in par['context']]),
+                            'questions': np.array([[0 for _ in range(self.config.len_sent_questions)]
+                                                   for _ in range(self.config.len_questions - len(par['questions']))] \
+                                                  + [[0 for _ in range(self.config.len_sent_questions - len(sent))] + sent
+                                                     for sent in par['questions']]),
+                            'answers': np.array([0 for _ in range(self.config.len_questions - len(par['answers']))] + par['answers'])
                            } for par in dataset]
         return encoded_dataset
 
-    def max_size_sent(self, encoded_data):
-        return max(
-          max([max([len(sent) for sent in par['context']]) for par in encoded_data]),
-          max([max([len(question['question']) for question in par['qas']]) for par in encoded_data])
-          )
+    def variable_len_sent_context(self, encoded_data):
+        return [[len(sent) for sent in par['context']] for par in encoded_data]
+
+    def variable_len_sent_questions(self, encoded_data):
+        return [[len(sent) for sent in par['questions']] for par in encoded_data]
+
+    def max_len_sent_context(self, encoded_data):
+        return max([max([len(sent) for sent in par['context']]) for par in encoded_data])
+        
+    def max_len_sent_questions(self, encoded_data):
+        return max([max([len(sent) for sent in par['questions']]) for par in encoded_data])
         
     def max_len_context(self, encoded_data):
         return max([len(par['context']) for par in encoded_data])
         
     def max_len_questions(self, encoded_data):
-        return max([len(par['qas']) for par in encoded_data])
+        return max([len(par['questions']) for par in encoded_data])
         
     def load_data(self, debug=False):
         """Loads starter word-vectors and train/dev/test data."""
-        with open('/Users/nicolashennetier/Desktop/Stanford/Deep Learning and Natural Language Processing/Final Project/data/train.json') as data_file:
+        with open('./data/train.json') as data_file:
             train = json.load(data_file)
-        with open('/Users/nicolashennetier/Desktop/Stanford/Deep Learning and Natural Language Processing/Final Project/data/dev.json') as data_file:
+        with open('./data/dev.json') as data_file:
             dev = json.load(data_file)
 
         words_train, dataset_train = self.preprocess(train)
@@ -100,16 +107,33 @@ class QA_Model():
         self.vocab = Vocab()
         self.vocab.construct(words_train + words_dev)
 
+        glove_vecs = {}
+        with open('./data/glove.840B.300d.txt') as glove_file:
+            for line in glove_file:
+                vec = line.split()
+                if len(vec) == 301 and vec[0] in self.vocab.word_to_index.keys():
+                    glove_vecs[vec[0]] = [float(x) for x in vec[1:]]
+
+        self.embeddings = np.zeros((len(self.vocab), 300))
+        for ind, word in self.vocab.index_to_word.items():
+            try:
+                self.embeddings[ind,:] = glove_vecs[word]
+            except:
+                self.embeddings[ind,:] = np.zeros(300)
+        self.embeddings = self.embeddings.astype(np.float32)
+
         self.encoded_train = self.encode_dataset(dataset_train)
         self.encoded_valid = self.encode_dataset(dataset_dev)
 
-        self.config.num_steps = max(self.max_size_sent(self.encoded_train),
-                             self.max_size_sent(self.encoded_valid))
-        self.config.num_context = max(self.max_len_context(self.encoded_train),
-                               self.max_len_context(self.encoded_valid))
-        self.config.num_questions = max(self.max_len_questions(self.encoded_train),
-                                 self.max_len_questions(self.encoded_valid))
-
+        self.config.len_sent_context = max(self.max_len_sent_context(self.encoded_train),
+                                           self.max_len_sent_context(self.encoded_valid))
+        self.config.len_context = max(self.max_len_context(self.encoded_train),
+                                      self.max_len_context(self.encoded_valid))
+        self.config.len_sent_questions = max(self.max_len_sent_questions(self.encoded_train),
+                                           self.max_len_sent_questions(self.encoded_valid))
+        self.config.len_questions = max(self.max_len_questions(self.encoded_train),
+                                      self.max_len_questions(self.encoded_valid))
+        
         self.encoded_train = self.reencode_dataset(self.encoded_train)
         self.encoded_valid = self.reencode_dataset(self.encoded_valid)
         
@@ -134,13 +158,13 @@ class RNNContext_Model(QA_Model):
                              type tf.float32
         """
         self.context_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.num_context, self.config.num_steps],
+            shape=[self.config.len_context, self.config.len_sent_context],
             name='Context')
         self.questions_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.num_questions, self.config.num_steps],
+            shape=[self.config.len_questions, self.config.len_sent_questions],
             name='Context')
         self.answers_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.num_questions],
+            shape=[self.config.len_questions],
             name='Answer')
     
     def add_embedding(self):
@@ -152,15 +176,16 @@ class RNNContext_Model(QA_Model):
         """
         # The embedding lookup is currently only implemented for the CPU
         with tf.device('/cpu:0'):
-            embeddings = tf.get_variable('Embedding',
-                                         [len(self.vocab), self.config.embed_size],
-                                         trainable=True)
-            embed_context = tf.nn.embedding_lookup(embeddings,
+            if not self.config.pretrained_embed:
+                self.embeddings = tf.get_variable('Embedding',
+                                                  [len(self.vocab), self.config.embed_size],
+                                                  trainable=True)
+            embed_context = tf.nn.embedding_lookup(self.embeddings,
                                                    self.context_placeholder)
-            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.num_steps, embed_context)]
-            embed_questions = tf.nn.embedding_lookup(embeddings,
-                                                   self.questions_placeholder)
-            questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.num_steps, embed_questions)]
+            embed_questions = tf.nn.embedding_lookup(self.embeddings,
+                                                     self.questions_placeholder)
+            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_context, embed_context)]
+            questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_questions, embed_questions)]
           
         return context, questions
 
@@ -206,11 +231,12 @@ class RNNContext_Model(QA_Model):
         Returns:
           loss: A 0-d tensor (scalar)
         """
-        all_ones = [tf.ones([tf.shape(output)[0]])]
-        cross_entropy = sequence_loss([output],
-            [self.answers_placeholder],
-            all_ones,
-            len(self.vocab))
+        labels = tf.one_hot(self.answers_placeholder,
+            len(self.vocab),
+            on_value=1,
+            off_value=0,
+            axis=-1)
+        cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(output, labels))
         tf.add_to_collection('total_loss', cross_entropy)
         loss = tf.add_n(tf.get_collection('total_loss'))
 
@@ -275,8 +301,8 @@ class RNNContext_Model(QA_Model):
         context = inputs[0]
         questions = inputs[1]
         
-        with tf.variable_scope('RNN') as scope:
-            self.initial_state = tf.zeros([self.config.num_context, self.config.hidden_size])
+        with tf.variable_scope('RNN_Context') as scope:
+            self.initial_state = tf.zeros([self.config.len_context, self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
             for tstep, current_sent in enumerate(context):
@@ -306,11 +332,13 @@ class RNNContext_Model(QA_Model):
                 h = tf.mul(o, tf.tanh(c))
             self.final_state_context = h
 
-            self.initial_state = tf.zeros([self.config.num_questions, self.config.hidden_size])
+        with tf.variable_scope('RNN_Questions') as scope:
+            self.initial_state = tf.zeros([self.config.len_questions, self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
-            for current_sent in questions:
-                scope.reuse_variables()
+            for tstep, current_sent in enumerate(questions):
+                if tstep > 0:
+                    scope.reuse_variables()
                 Ui = tf.get_variable(
                     'Ui', [self.config.hidden_size, self.config.hidden_size])
                 Wi = tf.get_variable(
@@ -365,11 +393,11 @@ class RNNContext_Model(QA_Model):
             num_answers += len(answers)
             if verbose and step % verbose == 0:
                 sys.stdout.write('\r{} / {} : pp = {}'.format(
-                    step, total_steps, np.exp(np.mean(total_loss))))
+                    step, total_steps, np.mean(total_loss)))
                 sys.stdout.flush()
         if verbose:
             sys.stdout.write('\r')
-        return np.exp(np.mean(total_loss)), pos_preds / num_answers
+        return np.mean(total_loss), pos_preds / num_answers
 
 def test_RNNLM():
     config = Config()
@@ -380,26 +408,26 @@ def test_RNNLM():
     saver = tf.train.Saver()
 
     with tf.Session() as session:
-        best_val_pp = float('inf')
+        best_val_ce = float('inf')
         best_val_epoch = 0
     
         session.run(init)
         for epoch in range(config.max_epochs):
             print('Epoch {}'.format(epoch))
             start = time.time()
-            train_pp, train_accuracy = model.run_epoch(
+            train_ce, train_accuracy = model.run_epoch(
                 session, model.encoded_train,
                 train_op=model.train_step)
-            print('Training perplexity: {}'.format(train_pp))
+            print('Training cross-entropy: {}'.format(train_ce))
             print('Training accuracy: {}'.format(train_accuracy))
 
-            valid_pp, valid_accuracy = model.run_epoch(
+            valid_ce, valid_accuracy = model.run_epoch(
                 session, model.encoded_valid)
-            print('Validation perplexity: {}'.format(valid_pp))
+            print('Validation cross-entropy: {}'.format(valid_ce))
             print('Validation accuracy: {}'.format(valid_accuracy))
 
-            if valid_pp < best_val_pp:
-                best_val_pp = valid_pp
+            if valid_ce < best_val_ce:
+                best_val_ce = valid_ce
                 best_val_epoch = epoch
                 saver.save(session, './ptb_rnnlm.weights')
             if epoch - best_val_epoch > config.early_stopping:
@@ -407,10 +435,10 @@ def test_RNNLM():
             print('Total time: {}'.format(time.time() - start))
         
         saver.restore(session, 'ptb_rnnlm.weights')    
-        test_pp, test_accuracy = model.run_epoch(
+        test_ce, test_accuracy = model.run_epoch(
             session, model.encoded_test)
         print('=-=' * 5)
-        print('Test perplexity: {}'.format(test_pp))
+        print('Test cross-entropy: {}'.format(test_ce))
         print('Test accuracy: {}'.format(test_accuracy))
         print('=-=' * 5)
 
