@@ -47,42 +47,51 @@ class QA_Model():
         return words, dataset
 
     def encode_dataset(self, dataset):
-        encoded_dataset = [{'context': [[self.vocab.encode(word.lower()) 
-                                         for word in sent]
-                                        for sent in par['context']],
-                            'qas': [{'question': [self.vocab.encode(word.lower()) 
-                                                  for word in question['question']],
-                                     'answer': self.vocab.encode(question['answer'].lower())
-                                    } for question in par['qas']]}
+        encoded_dataset = [{'context': sorted([[self.vocab.encode(word.lower()) 
+                                                for word in sent]
+                                               for sent in par['context']],
+                                              key=len,
+                                              reverse=True),
+                            'questions': sorted([[self.vocab.encode(word.lower()) 
+                                                  for word in question['question']]
+                                                 for question in par['qas']],
+                                                 key=len,
+                                                 reverse=True),
+                            'answers': [self.vocab.encode(question['answer'].lower())
+                                        for question in par['qas']]}
                            for par in dataset]
         return encoded_dataset
 
     def reencode_dataset(self, dataset):
-        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.num_steps - len(sent))] \
-                                                 + sent
-                                                 for sent in par['context']] \
-                                                + [[0 for _ in range(self.config.num_steps)]
-                                                   for _ in range(self.config.num_context - len(par['context']))]),
-                            'questions': np.array([[0 for _ in range(self.config.num_steps - len(question['question']))] \
-                                                   + question['question'] for question in par['qas']] \
-                                                  + [[0 for _ in range(self.config.num_steps)]
-                                                     for _ in range(self.config.num_questions - len(par['qas']))]),
-                            'answers': np.array([question['answer'] for question in par['qas']] \
-                                                + [0 for _ in range(self.config.num_questions - len(par['qas']))])
+        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.len_sent_context)]
+                                                 for _ in range(self.config.len_context - len(par['context']))] \
+                                                + [sent + [0 for _ in range(self.config.len_sent_context - len(sent))]
+                                                   for sent in par['context']]),
+                            'questions': np.array([[0 for _ in range(self.config.len_sent_questions)]
+                                                   for _ in range(self.config.len_questions - len(par['questions']))] \
+                                                  + [sent + [0 for _ in range(self.config.len_sent_questions - len(sent))] \
+                                                     for sent in par['questions']]),
+                            'answers': np.array([0 for _ in range(self.config.len_questions - len(par['answers']))] + par['answers'])
                            } for par in dataset]
         return encoded_dataset
 
-    def max_size_sent(self, encoded_data):
-        return max(
-          max([max([len(sent) for sent in par['context']]) for par in encoded_data]),
-          max([max([len(question['question']) for question in par['qas']]) for par in encoded_data])
-          )
+    def variable_len_sent_context(self, encoded_data):
+        return [[len(sent) for sent in par['context']] for par in encoded_data]
+
+    def variable_len_sent_questions(self, encoded_data):
+        return [[len(sent) for sent in par['questions']] for par in encoded_data]
+
+    def max_len_sent_context(self, encoded_data):
+        return max([max([len(sent) for sent in par['context']]) for par in encoded_data])
+        
+    def max_len_sent_questions(self, encoded_data):
+        return max([max([len(sent) for sent in par['questions']]) for par in encoded_data])
         
     def max_len_context(self, encoded_data):
         return max([len(par['context']) for par in encoded_data])
         
     def max_len_questions(self, encoded_data):
-        return max([len(par['qas']) for par in encoded_data])
+        return max([len(par['questions']) for par in encoded_data])
         
     def load_data(self, debug=False):
         """Loads starter word-vectors and train/dev/test data."""
@@ -115,13 +124,15 @@ class QA_Model():
         self.encoded_train = self.encode_dataset(dataset_train)
         self.encoded_valid = self.encode_dataset(dataset_dev)
 
-        self.config.num_steps = max(self.max_size_sent(self.encoded_train),
-                             self.max_size_sent(self.encoded_valid))
-        self.config.num_context = max(self.max_len_context(self.encoded_train),
-                               self.max_len_context(self.encoded_valid))
-        self.config.num_questions = max(self.max_len_questions(self.encoded_train),
-                                 self.max_len_questions(self.encoded_valid))
-
+        self.config.len_sent_context = max(self.max_len_sent_context(self.encoded_train),
+                                           self.max_len_sent_context(self.encoded_valid))
+        self.config.len_context = max(self.max_len_context(self.encoded_train),
+                                      self.max_len_context(self.encoded_valid))
+        self.config.len_sent_questions = max(self.max_len_sent_questions(self.encoded_train),
+                                           self.max_len_sent_questions(self.encoded_valid))
+        self.config.len_questions = max(self.max_len_questions(self.encoded_train),
+                                      self.max_len_questions(self.encoded_valid))
+        
         self.encoded_train = self.reencode_dataset(self.encoded_train)
         self.encoded_valid = self.reencode_dataset(self.encoded_valid)
         
@@ -146,13 +157,13 @@ class RNNContext_Model(QA_Model):
                              type tf.float32
         """
         self.context_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.num_context, self.config.num_steps],
+            shape=[self.config.len_context, self.config.len_sent_context],
             name='Context')
         self.questions_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.num_questions, self.config.num_steps],
+            shape=[self.config.len_questions, self.config.len_sent_questions],
             name='Context')
         self.answers_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.num_questions],
+            shape=[self.config.len_questions],
             name='Answer')
     
     def add_embedding(self):
@@ -166,10 +177,10 @@ class RNNContext_Model(QA_Model):
         with tf.device('/cpu:0'):
             embed_context = tf.nn.embedding_lookup(self.embeddings,
                                                    self.context_placeholder)
-            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.num_steps, embed_context)]
+            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_context, embed_context)]
             embed_questions = tf.nn.embedding_lookup(self.embeddings,
-                                                   self.questions_placeholder)
-            questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.num_steps, embed_questions)]
+                                                     self.questions_placeholder)
+            questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_questions, embed_questions)]
           
         return context, questions
 
@@ -220,7 +231,7 @@ class RNNContext_Model(QA_Model):
             on_value=1,
             off_value=0,
             axis=-1)
-        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(output, labels))
+        cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(output, labels))
         tf.add_to_collection('total_loss', cross_entropy)
         loss = tf.add_n(tf.get_collection('total_loss'))
 
@@ -285,8 +296,8 @@ class RNNContext_Model(QA_Model):
         context = inputs[0]
         questions = inputs[1]
         
-        with tf.variable_scope('RNN') as scope:
-            self.initial_state = tf.zeros([self.config.num_context, self.config.hidden_size])
+        with tf.variable_scope('RNN_Context') as scope:
+            self.initial_state = tf.zeros([self.config.len_context, self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
             for tstep, current_sent in enumerate(context):
@@ -316,11 +327,13 @@ class RNNContext_Model(QA_Model):
                 h = tf.mul(o, tf.tanh(c))
             self.final_state_context = h
 
-            self.initial_state = tf.zeros([self.config.num_questions, self.config.hidden_size])
+        with tf.variable_scope('RNN_Questions') as scope:
+            self.initial_state = tf.zeros([self.config.len_questions, self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
-            for current_sent in questions:
-                scope.reuse_variables()
+            for tstep, current_sent in enumerate(questions):
+                if tstep > 0:
+                    scope.reuse_variables()
                 Ui = tf.get_variable(
                     'Ui', [self.config.hidden_size, self.config.hidden_size])
                 Wi = tf.get_variable(
