@@ -107,20 +107,21 @@ class QA_Model():
         self.vocab = Vocab()
         self.vocab.construct(words_train + words_dev)
 
-        glove_vecs = {}
-        with open('./data/glove.840B.300d.txt') as glove_file:
-            for line in glove_file:
-                vec = line.split()
-                if len(vec) == 301 and vec[0] in self.vocab.word_to_index.keys():
-                    glove_vecs[vec[0]] = [float(x) for x in vec[1:]]
+        if self.config.pretrained_embed:
+            glove_vecs = {}
+            with open('./data/glove.840B.300d.txt') as glove_file:
+                for line in glove_file:
+                    vec = line.split()
+                    if len(vec) == 301 and vec[0] in self.vocab.word_to_index.keys():
+                        glove_vecs[vec[0]] = [float(x) for x in vec[1:]]
 
-        self.embeddings = np.zeros((len(self.vocab), 300))
-        for ind, word in self.vocab.index_to_word.items():
-            try:
-                self.embeddings[ind,:] = glove_vecs[word]
-            except:
-                self.embeddings[ind,:] = np.zeros(300)
-        self.embeddings = self.embeddings.astype(np.float32)
+            self.embeddings = np.zeros((len(self.vocab), 300))
+            for ind, word in self.vocab.index_to_word.items():
+                try:
+                    self.embeddings[ind,:] = glove_vecs[word]
+                except:
+                    self.embeddings[ind,:] = np.zeros(300)
+            self.embeddings = self.embeddings.astype(np.float32)
 
         self.encoded_train = self.encode_dataset(dataset_train)
         self.encoded_valid = self.encode_dataset(dataset_dev)
