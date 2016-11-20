@@ -64,15 +64,11 @@ class QA_Model():
         return encoded_dataset
 
     def reencode_dataset(self, dataset):
-        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.len_sent_context)]
-                                                 for _ in range(self.config.len_context - len(par['context']))] \
-                                                + [[0 for _ in range(self.config.len_sent_context - len(sent))] + sent
-                                                   for sent in par['context']]),
-                            'questions': np.array([[0 for _ in range(self.config.len_sent_questions)]
-                                                   for _ in range(self.config.len_questions - len(par['questions']))] \
-                                                  + [[0 for _ in range(self.config.len_sent_questions - len(sent))] + sent
-                                                     for sent in par['questions']]),
-                            'answers': np.array([0 for _ in range(self.config.len_questions - len(par['answers']))] + par['answers'])
+        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.len_sent_context - len(sent))] + sent
+                                                 for sent in par['context']]),
+                            'questions': np.array([[0 for _ in range(self.config.len_sent_questions - len(sent))] + sent
+                                                   for sent in par['questions']]),
+                            'answers': np.array(par['answers'])
                            } for par in dataset]
         return encoded_dataset
 
@@ -87,12 +83,6 @@ class QA_Model():
         
     def max_len_sent_questions(self, encoded_data):
         return max([max([len(sent) for sent in par['questions']]) for par in encoded_data])
-        
-    def max_len_context(self, encoded_data):
-        return max([len(par['context']) for par in encoded_data])
-        
-    def max_len_questions(self, encoded_data):
-        return max([len(par['questions']) for par in encoded_data])
         
     def load_data(self, debug=False):
         """Loads starter word-vectors and train/dev/test data."""
@@ -128,12 +118,8 @@ class QA_Model():
 
         self.config.len_sent_context = max(self.max_len_sent_context(self.encoded_train),
                                            self.max_len_sent_context(self.encoded_valid))
-        self.config.len_context = max(self.max_len_context(self.encoded_train),
-                                      self.max_len_context(self.encoded_valid))
         self.config.len_sent_questions = max(self.max_len_sent_questions(self.encoded_train),
                                            self.max_len_sent_questions(self.encoded_valid))
-        self.config.len_questions = max(self.max_len_questions(self.encoded_train),
-                                      self.max_len_questions(self.encoded_valid))
         
         self.encoded_train = self.reencode_dataset(self.encoded_train)
         self.encoded_valid = self.reencode_dataset(self.encoded_valid)
@@ -159,14 +145,23 @@ class RNNContext_Model(QA_Model):
                              type tf.float32
         """
         self.context_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.len_context, self.config.len_sent_context],
+            shape=[None, self.config.len_sent_context],
             name='Context')
         self.questions_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.len_questions, self.config.len_sent_questions],
-            name='Context')
+            shape=[None, self.config.len_sent_questions],
+            name='Questions')
         self.answers_placeholder = tf.placeholder(tf.int32,
-            shape=[self.config.len_questions],
-            name='Answer')
+            shape=[None],
+            name='Answers')
+        self.output_gates_placeholder1 = tf.placeholder(tf.float32,
+            shape=[None, None],
+            name='OutputGates1')
+        self.output_gates_placeholder2 = tf.placeholder(tf.float32,
+            shape=[None, None],
+            name='OutputGates2')
+        self.output_placeholder = tf.placeholder(tf.float32,
+            shape=[None, None],
+            name='Output')
     
     def add_embedding(self):
         """Add embedding layer.
@@ -215,11 +210,13 @@ class RNNContext_Model(QA_Model):
               [self.config.hidden_size])
             W = tf.get_variable('W',
               [self.config.hidden_size, len(self.vocab)])
-            output_gates = [tf.matmul(tf.reshape(x, [1, self.config.hidden_size]), Uc) \
-                            + tf.matmul(h_questions, Uq) + bc \
-                            for x in tf.unpack(h_context)]
-            outputs = tf.add_n([tf.mul(tf.reshape(x, [1, self.config.hidden_size]), output_gates[i]) 
-                                for i, x in enumerate(tf.unpack(h_context))])
+            og1 = tf.matmul(h_questions, Uq)
+            og2 = tf.matmul(h_context, Uc)
+            og1 = tf.matmul(self.output_gates_placeholder1, og1)
+            og2 = tf.matmul(self.output_gates_placeholder2, og2)
+            output_gates = tf.sigmoid(og1 + og2)
+            outputs = tf.mul(tf.matmul(self.output_gates_placeholder2, h_context), output_gates)
+            outputs = tf.matmul(self.output_placeholder, outputs)
             outputs = tf.matmul(outputs, W)
 
         return outputs
@@ -303,7 +300,7 @@ class RNNContext_Model(QA_Model):
         questions = inputs[1]
         
         with tf.variable_scope('RNN_Context') as scope:
-            self.initial_state = tf.zeros([self.config.len_context, self.config.hidden_size])
+            self.initial_state = tf.zeros([tf.shape(context[0])[0], self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
             for tstep, current_sent in enumerate(context):
@@ -334,7 +331,7 @@ class RNNContext_Model(QA_Model):
             self.final_state_context = h
 
         with tf.variable_scope('RNN_Questions') as scope:
-            self.initial_state = tf.zeros([self.config.len_questions, self.config.hidden_size])
+            self.initial_state = tf.zeros([tf.shape(questions[0])[0], self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
             for tstep, current_sent in enumerate(questions):
@@ -379,10 +376,19 @@ class RNNContext_Model(QA_Model):
             context = paragraph['context']
             questions = paragraph['questions']
             answers = paragraph['answers']
+            output_gates1 = np.concatenate([np.identity(len(questions)) for _ in range(len(context))])
+            output_gates2 = [np.zeros((len(questions), len(context))) for _ in range(len(context))]
+            for i in range(len(context)):
+                output_gates2[i][:,i] = 1
+            output_gates2 = np.concatenate(output_gates2)
+            output = np.concatenate([np.identity(len(questions)) for _ in range(len(context))], 1)
             
             feed = {self.context_placeholder: context,
                     self.questions_placeholder: questions,
-                    self.answers_placeholder: answers}
+                    self.answers_placeholder: answers,
+                    self.output_gates_placeholder1: output_gates1,
+                    self.output_gates_placeholder2: output_gates2,
+                    self.output_placeholder: output}
             loss, _, pred = session.run(
                 [self.calculate_loss, train_op, self.predictions], feed_dict=feed)
             total_loss.append(loss)
