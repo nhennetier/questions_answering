@@ -24,7 +24,7 @@ class Config(object):
     hidden_size = 100
     max_epochs = 16
     early_stopping = 2
-    lr = 0.001
+    lr = 1e-3
   
 
 class QA_Model():
@@ -201,7 +201,7 @@ class RNNContext_Model(QA_Model):
         h_context = rnn_outputs[0]
         h_questions = rnn_outputs[1]
         
-        with tf.variable_scope('Projection-Layer') as scope:
+        with tf.variable_scope('Projection-Layer', initializer=tf.contrib.layers.xavier_initializer()) as scope:
             Uc = tf.get_variable('Uc',
               [self.config.hidden_size, self.config.hidden_size])
             Uq = tf.get_variable('Uq',
@@ -299,7 +299,7 @@ class RNNContext_Model(QA_Model):
         context = inputs[0]
         questions = inputs[1]
         
-        with tf.variable_scope('RNN_Context') as scope:
+        with tf.variable_scope('RNN_Context', initializer=tf.contrib.layers.xavier_initializer()) as scope:
             self.initial_state = tf.zeros([tf.shape(context[0])[0], self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
@@ -327,10 +327,10 @@ class RNNContext_Model(QA_Model):
                 o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo))
                 ct = tf.nn.tanh(tf.matmul(h, Uc) + tf.matmul(current_sent, Wc))
                 c = tf.mul(f,c) + tf.mul(i,ct)
-                h = tf.mul(o, tf.tanh(c))
+                h = tf.mul(o, tf.nn.tanh(c))
             self.final_state_context = h
 
-        with tf.variable_scope('RNN_Questions') as scope:
+        with tf.variable_scope('RNN_Questions', initializer=tf.contrib.layers.xavier_initializer()) as scope:
             self.initial_state = tf.zeros([tf.shape(questions[0])[0], self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
@@ -358,7 +358,7 @@ class RNNContext_Model(QA_Model):
                 o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo))
                 ct = tf.nn.tanh(tf.matmul(h, Uc) + tf.matmul(current_sent, Wc))
                 c = tf.mul(f,c) + tf.mul(i,ct)
-                h = tf.mul(o, tf.tanh(c))
+                h = tf.mul(o, tf.nn.tanh(c))
             self.final_state_questions = h
 
         return self.final_state_context, self.final_state_questions
@@ -393,9 +393,6 @@ class RNNContext_Model(QA_Model):
                 [self.calculate_loss, train_op, self.predictions], feed_dict=feed)
             total_loss.append(loss)
             pred = np.argmax(pred, 1)
-            pred = pred[answers>0]
-            questions = questions[answers>0]
-            answers = answers[answers>0]
             pos_preds += np.sum(pred==answers)
             num_answers += len(answers)
             if verbose and step % verbose == 0:
