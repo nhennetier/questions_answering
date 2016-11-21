@@ -22,8 +22,8 @@ class Config(object):
     embed_size = 300
     pretrained_embed = False
     hidden_size = 100
-    max_epochs = 16
-    early_stopping = 2
+    max_epochs = 100
+    early_stopping = 10
     lr = 1e-3
   
 
@@ -131,19 +131,6 @@ class QA_Model():
 
 class RNNContext_Model(QA_Model):
     def add_placeholders(self):
-        """Generate placeholder variables to represent the input tensors
-
-        These placeholders are used as inputs by the rest of the model building
-        code and will be fed data during training.  Note that when "None" is in a
-        placeholder's shape, it's flexible
-
-        context_placeholder: Input placeholder tensor of shape
-                           (None, num_steps), type tf.int32
-        answers_placeholder: Labels placeholder tensor of shape
-                            (None, num_steps), type tf.float32
-        dropout_placeholder: Dropout value placeholder (scalar),
-                             type tf.float32
-        """
         self.context_placeholder = tf.placeholder(tf.int32,
             shape=[None, self.config.len_sent_context],
             name='Context')
@@ -164,13 +151,6 @@ class RNNContext_Model(QA_Model):
             name='Output')
     
     def add_embedding(self):
-        """Add embedding layer.
-
-        Returns:
-          inputs: List of length num_steps, each of whose elements should be
-                  a tensor of shape (batch_size, embed_size).
-        """
-        # The embedding lookup is currently only implemented for the CPU
         with tf.device('/cpu:0'):
             if not self.config.pretrained_embed:
                 self.embeddings = tf.get_variable('Embedding',
@@ -186,18 +166,6 @@ class RNNContext_Model(QA_Model):
         return context, questions
 
     def add_projection(self, rnn_outputs):
-        """Adds a projection layer.
-
-        The projection layer transforms the hidden representation to a distribution
-        over the vocabulary.
-
-        Args:
-          rnn_outputs: List of length num_steps, each of whose elements should be
-                       a tensor of shape (batch_size, embed_size).
-        Returns:
-          outputs: List of length num_steps, each a tensor of shape
-                   (batch_size, len(vocab)
-        """
         h_context = rnn_outputs[0]
         h_questions = rnn_outputs[1]
         
@@ -222,13 +190,6 @@ class RNNContext_Model(QA_Model):
         return outputs
 
     def add_loss_op(self, output):
-        """Adds loss ops to the computational graph.
-
-        Args:
-          output: A tensor of shape (None, self.vocab)
-        Returns:
-          loss: A 0-d tensor (scalar)
-        """
         labels = tf.one_hot(self.answers_placeholder,
             len(self.vocab),
             on_value=1,
@@ -241,24 +202,6 @@ class RNNContext_Model(QA_Model):
         return loss
 
     def add_training_op(self, loss):
-        """Sets up the training Ops.
-
-        Creates an optimizer and applies the gradients to all trainable variables.
-        The Op returned by this function is what must be passed to the
-        `sess.run()` call to cause the model to train. See 
-
-        https://www.tensorflow.org/versions/r0.7/api_docs/python/train.html#Optimizer
-
-        for more information.
-
-        Hint: Use tf.train.AdamOptimizer for this model.
-              Calling optimizer.minimize() will return a train_op object.
-
-        Args:
-          loss: Loss tensor, from cross_entropy_loss.
-        Returns:
-          train_op: The Op for training.
-        """
         optimizer = tf.train.AdamOptimizer(self.config.lr)
         train_op = optimizer.minimize(self.calculate_loss)
 
@@ -269,20 +212,16 @@ class RNNContext_Model(QA_Model):
         self.load_data(debug=False)
         self.add_placeholders()
         self.inputs = self.add_embedding()
-        self.rnn_outputs = self.add_model(self.inputs)
+        self.rnn_outputs = (self.add_model(self.inputs[0], 'Context'),
+                            self.add_model(self.inputs[1], 'Questions'))
         self.outputs = self.add_projection(self.rnn_outputs)
         
-        # We want to check how well we correctly predict the next word
-        # We cast o to float64 as there are numerical issues at hand
-        # (i.e. sum(output of softmax) = 1.00000298179 and not 1)
         self.predictions = tf.nn.softmax(tf.cast(self.outputs, tf.float64))
-        # Reshape the output into len(vocab) sized chunks - the -1 says as many as
-        # needed to evenly divide
         self.calculate_loss = self.add_loss_op(self.outputs)
         self.train_step = self.add_training_op(self.calculate_loss)
 
 
-    def add_model(self, inputs):
+    def add_model(self, inputs, type_layer):
         """Creates the RNN LM model.
 
         In the space provided below, you need to implement the equations for the
@@ -296,72 +235,51 @@ class RNNContext_Model(QA_Model):
           outputs: List of length num_steps, each of whose elements should be
                    a tensor of shape (batch_size, hidden_size)
         """
-        context = inputs[0]
-        questions = inputs[1]
-        
-        with tf.variable_scope('RNN_Context', initializer=tf.contrib.layers.xavier_initializer()) as scope:
-            self.initial_state = tf.zeros([tf.shape(context[0])[0], self.config.hidden_size])
+        with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
+            self.initial_state = tf.zeros([tf.shape(inputs[0])[0], self.config.hidden_size])
             h = self.initial_state
             c = self.initial_state
-            for tstep, current_sent in enumerate(context):
+            for tstep, current_sent in enumerate(inputs):
                 if tstep > 0:
                     scope.reuse_variables()
                 Ui = tf.get_variable(
                     'Ui', [self.config.hidden_size, self.config.hidden_size])
                 Wi = tf.get_variable(
                     'Wi', [self.config.embed_size, self.config.hidden_size])
+                bi = tf.get_variable(
+                    'bi', [self.config.hidden_size])
+                pi = tf.get_variable(
+                    'pi', [self.config.hidden_size])
                 Uf = tf.get_variable(
                     'Uf', [self.config.hidden_size, self.config.hidden_size])
                 Wf = tf.get_variable(
                     'Wf', [self.config.embed_size, self.config.hidden_size])
+                bf = tf.get_variable(
+                    'bf', [self.config.hidden_size])
+                pf = tf.get_variable(
+                    'pf', [self.config.hidden_size])
                 Uo = tf.get_variable(
                     'Uo', [self.config.hidden_size, self.config.hidden_size])
                 Wo = tf.get_variable(
                     'Wo', [self.config.embed_size, self.config.hidden_size])
-                Uc = tf.get_variable(
-                    'Uc', [self.config.hidden_size, self.config.hidden_size])
-                Wc = tf.get_variable(
-                    'Wc', [self.config.embed_size, self.config.hidden_size])
-                i = tf.nn.sigmoid(tf.matmul(h, Ui) + tf.matmul(current_sent, Wi))
-                f = tf.nn.sigmoid(tf.matmul(h, Uf) + tf.matmul(current_sent, Wf))
-                o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo))
-                ct = tf.nn.tanh(tf.matmul(h, Uc) + tf.matmul(current_sent, Wc))
-                c = tf.mul(f,c) + tf.mul(i,ct)
+                bo = tf.get_variable(
+                    'bo', [self.config.hidden_size])
+                po = tf.get_variable(
+                    'po', [self.config.hidden_size])
+                Uz = tf.get_variable(
+                    'Uz', [self.config.hidden_size, self.config.hidden_size])
+                Wz = tf.get_variable(
+                    'Wz', [self.config.embed_size, self.config.hidden_size])
+                bz = tf.get_variable(
+                    'bz', [self.config.hidden_size])
+                z = tf.nn.tanh(tf.matmul(h, Uz) + tf.matmul(current_sent, Wz) + bz)
+                i = tf.nn.sigmoid(tf.matmul(h, Ui) + tf.matmul(current_sent, Wi) + tf.mul(pi, c) + bi)
+                f = tf.nn.sigmoid(tf.matmul(h, Uf) + tf.matmul(current_sent, Wf) + tf.mul(pf, c) + bf)
+                c = tf.mul(f,c) + tf.mul(i,z)
+                o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, c) + bo)
                 h = tf.mul(o, tf.nn.tanh(c))
-            self.final_state_context = h
-
-        with tf.variable_scope('RNN_Questions', initializer=tf.contrib.layers.xavier_initializer()) as scope:
-            self.initial_state = tf.zeros([tf.shape(questions[0])[0], self.config.hidden_size])
-            h = self.initial_state
-            c = self.initial_state
-            for tstep, current_sent in enumerate(questions):
-                if tstep > 0:
-                    scope.reuse_variables()
-                Ui = tf.get_variable(
-                    'Ui', [self.config.hidden_size, self.config.hidden_size])
-                Wi = tf.get_variable(
-                    'Wi', [self.config.embed_size, self.config.hidden_size])
-                Uf = tf.get_variable(
-                    'Uf', [self.config.hidden_size, self.config.hidden_size])
-                Wf = tf.get_variable(
-                    'Wf', [self.config.embed_size, self.config.hidden_size])
-                Uo = tf.get_variable(
-                    'Uo', [self.config.hidden_size, self.config.hidden_size])
-                Wo = tf.get_variable(
-                    'Wo', [self.config.embed_size, self.config.hidden_size])
-                Uc = tf.get_variable(
-                    'Uc', [self.config.hidden_size, self.config.hidden_size])
-                Wc = tf.get_variable(
-                    'Wc', [self.config.embed_size, self.config.hidden_size])
-                i = tf.nn.sigmoid(tf.matmul(h, Ui) + tf.matmul(current_sent, Wi))
-                f = tf.nn.sigmoid(tf.matmul(h, Uf) + tf.matmul(current_sent, Wf))
-                o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo))
-                ct = tf.nn.tanh(tf.matmul(h, Uc) + tf.matmul(current_sent, Wc))
-                c = tf.mul(f,c) + tf.mul(i,ct)
-                h = tf.mul(o, tf.nn.tanh(c))
-            self.final_state_questions = h
-
-        return self.final_state_context, self.final_state_questions
+            self.final_state = h
+        return self.final_state
 
 
     def run_epoch(self, session, data, train_op=None, verbose=10):
