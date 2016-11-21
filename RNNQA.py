@@ -13,12 +13,6 @@ import tensorflow as tf
 
 
 class Config(object):
-    """Holds model hyperparams and data information.
-
-    The config class is used to store various hyperparameters and dataset
-    information parameters. Model objects are passed a Config() object at
-    instantiation.
-    """
     embed_size = 300
     pretrained_embed = False
     hidden_size = 100
@@ -85,7 +79,6 @@ class QA_Model():
         return max([max([len(sent) for sent in par['questions']]) for par in encoded_data])
         
     def load_data(self, debug=False):
-        """Loads starter word-vectors and train/dev/test data."""
         with open('./data/train.json') as data_file:
             train = json.load(data_file)
         with open('./data/dev.json') as data_file:
@@ -129,7 +122,21 @@ class QA_Model():
         self.encoded_valid = self.encoded_valid[:n]
 
 
-class RNNContext_Model(QA_Model):
+class RNN_QAModel(QA_Model):
+    def __init__(self, config):
+        self.config = config
+        self.load_data(debug=False)
+        self.add_placeholders()
+        self.inputs = self.add_embedding()
+        self.rnn_outputs = (self.add_model(self.inputs[0], 'Context'),
+                            self.add_model(self.inputs[1], 'Questions'))
+        self.outputs = self.add_projection(self.rnn_outputs)
+        
+        self.predictions = tf.nn.softmax(tf.cast(self.outputs, tf.float64))
+        self.calculate_loss = self.add_loss_op(self.outputs)
+        self.train_step = self.add_training_op(self.calculate_loss)
+
+
     def add_placeholders(self):
         self.context_placeholder = tf.placeholder(tf.int32,
             shape=[None, self.config.len_sent_context],
@@ -195,7 +202,7 @@ class RNNContext_Model(QA_Model):
             on_value=1,
             off_value=0,
             axis=-1)
-        cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(output, labels))
+        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(output, labels))
         tf.add_to_collection('total_loss', cross_entropy)
         loss = tf.add_n(tf.get_collection('total_loss'))
 
@@ -203,42 +210,14 @@ class RNNContext_Model(QA_Model):
 
     def add_training_op(self, loss):
         optimizer = tf.train.AdamOptimizer(self.config.lr)
-        train_op = optimizer.minimize(self.calculate_loss)
+        train_op = optimizer.minimize(loss)
 
         return train_op
     
-    def __init__(self, config):
-        self.config = config
-        self.load_data(debug=False)
-        self.add_placeholders()
-        self.inputs = self.add_embedding()
-        self.rnn_outputs = (self.add_model(self.inputs[0], 'Context'),
-                            self.add_model(self.inputs[1], 'Questions'))
-        self.outputs = self.add_projection(self.rnn_outputs)
-        
-        self.predictions = tf.nn.softmax(tf.cast(self.outputs, tf.float64))
-        self.calculate_loss = self.add_loss_op(self.outputs)
-        self.train_step = self.add_training_op(self.calculate_loss)
-
-
     def add_model(self, inputs, type_layer):
-        """Creates the RNN LM model.
-
-        In the space provided below, you need to implement the equations for the
-        RNN LM model. Note that you may NOT use built in rnn_cell functions from
-        tensorflow.
-
-        Args:
-          inputs: List of length num_steps, each of whose elements should be
-                  a tensor of shape (batch_size, embed_size).
-        Returns:
-          outputs: List of length num_steps, each of whose elements should be
-                   a tensor of shape (batch_size, hidden_size)
-        """
         with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
-            self.initial_state = tf.zeros([tf.shape(inputs[0])[0], self.config.hidden_size])
-            h = self.initial_state
-            c = self.initial_state
+            h = tf.zeros([tf.shape(inputs[0])[0], self.config.hidden_size])
+            c = h
             for tstep, current_sent in enumerate(inputs):
                 if tstep > 0:
                     scope.reuse_variables()
@@ -278,8 +257,7 @@ class RNNContext_Model(QA_Model):
                 c = tf.mul(f,c) + tf.mul(i,z)
                 o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, c) + bo)
                 h = tf.mul(o, tf.nn.tanh(c))
-            self.final_state = h
-        return self.final_state
+        return h
 
 
     def run_epoch(self, session, data, train_op=None, verbose=10):
@@ -315,16 +293,16 @@ class RNNContext_Model(QA_Model):
             num_answers += len(answers)
             if verbose and step % verbose == 0:
                 sys.stdout.write('\r{} / {} : pp = {}'.format(
-                    step, total_steps, np.mean(total_loss)))
+                    step, total_steps, np.sum(total_loss) / num_answers))
                 sys.stdout.flush()
         if verbose:
             sys.stdout.write('\r')
-        return np.mean(total_loss), pos_preds / num_answers
+        return np.sum(total_loss) / num_answers, pos_preds / num_answers
 
 def test_RNNLM():
     config = Config()
     with tf.variable_scope('RNNLM') as scope:
-        model = RNNContext_Model(config)
+        model = RNN_QAModel(config)
 
     init = tf.initialize_all_variables()
     saver = tf.train.Saver()
