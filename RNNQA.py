@@ -57,10 +57,10 @@ class QA_Model():
                            for par in dataset]
         return encoded_dataset
 
-    def reencode_dataset(self, dataset):
-        encoded_dataset = [{'context': np.array([[0 for _ in range(self.config.len_sent_context - len(sent))] + sent
+    def padding_dataset(self, dataset):
+        encoded_dataset = [{'context': np.array([sent + [0 for _ in range(self.config.len_sent_context - len(sent))]
                                                  for sent in par['context']]),
-                            'questions': np.array([[0 for _ in range(self.config.len_sent_questions - len(sent))] + sent
+                            'questions': np.array([sent + [0 for _ in range(self.config.len_sent_questions - len(sent))]
                                                    for sent in par['questions']]),
                             'answers': np.array(par['answers'])
                            } for par in dataset]
@@ -113,13 +113,21 @@ class QA_Model():
                                            self.max_len_sent_context(self.encoded_valid))
         self.config.len_sent_questions = max(self.max_len_sent_questions(self.encoded_train),
                                            self.max_len_sent_questions(self.encoded_valid))
+        self.config.lengths_sent_context = [self.variable_len_sent_context(self.encoded_train),
+                                            self.variable_len_sent_context(self.encoded_valid)]
+        self.config.lengths_sent_questions = [self.variable_len_sent_questions(self.encoded_train),
+                                              self.variable_len_sent_questions(self.encoded_valid)]
         
-        self.encoded_train = self.reencode_dataset(self.encoded_train)
-        self.encoded_valid = self.reencode_dataset(self.encoded_valid)
+        self.encoded_train = self.padding_dataset(self.encoded_train)
+        self.encoded_valid = self.padding_dataset(self.encoded_valid)
         
         n = floor(len(self.encoded_valid)/2)
         self.encoded_test = self.encoded_valid[n:]
+        self.config.lengths_sent_context.append(self.config.lengths_sent_context[1][n:])
+        self.config.lengths_sent_questions.append(self.config.lengths_sent_questions[1][n:])
         self.encoded_valid = self.encoded_valid[:n]
+        self.config.lengths_sent_context[1] = self.config.lengths_sent_context[1][:n]
+        self.config.lengths_sent_questions[1] = self.config.lengths_sent_questions[1][:n]
 
 
 class RNN_QAModel(QA_Model):
@@ -156,7 +164,17 @@ class RNN_QAModel(QA_Model):
         self.output_placeholder = tf.placeholder(tf.float32,
             shape=[None, None],
             name='Output')
-    
+        self.context_padding = []
+        for i in range(self.config.len_sent_context):
+            self.context_padding.append(tf.placeholder(tf.float32,
+                shape=[None, None],
+                name='ContextPadding%s' % i))
+        self.questions_padding = []
+        for i in range(self.config.len_sent_questions):
+            self.questions_padding.append(tf.placeholder(tf.float32,
+                shape=[None, None],
+                name='QuestionsPadding%s' % i))
+        
     def add_embedding(self):
         with tf.device('/cpu:0'):
             if not self.config.pretrained_embed:
@@ -172,48 +190,6 @@ class RNN_QAModel(QA_Model):
           
         return context, questions
 
-    def add_projection(self, rnn_outputs):
-        h_context = rnn_outputs[0]
-        h_questions = rnn_outputs[1]
-        
-        with tf.variable_scope('Projection-Layer', initializer=tf.contrib.layers.xavier_initializer()) as scope:
-            Uc = tf.get_variable('Uc',
-              [self.config.hidden_size, self.config.hidden_size])
-            Uq = tf.get_variable('Uq',
-              [self.config.hidden_size, self.config.hidden_size])
-            bc = tf.get_variable('bc',
-              [self.config.hidden_size])
-            W = tf.get_variable('W',
-              [self.config.hidden_size, len(self.vocab)])
-            og1 = tf.matmul(h_questions, Uq)
-            og2 = tf.matmul(h_context, Uc)
-            og1 = tf.matmul(self.output_gates_placeholder1, og1)
-            og2 = tf.matmul(self.output_gates_placeholder2, og2)
-            output_gates = tf.sigmoid(og1 + og2)
-            outputs = tf.mul(tf.matmul(self.output_gates_placeholder2, h_context), output_gates)
-            outputs = tf.matmul(self.output_placeholder, outputs)
-            outputs = tf.matmul(outputs, W)
-
-        return outputs
-
-    def add_loss_op(self, output):
-        labels = tf.one_hot(self.answers_placeholder,
-            len(self.vocab),
-            on_value=1,
-            off_value=0,
-            axis=-1)
-        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(output, labels))
-        tf.add_to_collection('total_loss', cross_entropy)
-        loss = tf.add_n(tf.get_collection('total_loss'))
-
-        return loss
-
-    def add_training_op(self, loss):
-        optimizer = tf.train.AdamOptimizer(self.config.lr)
-        train_op = optimizer.minimize(loss)
-
-        return train_op
-    
     def add_model(self, inputs, type_layer):
         with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
             h = tf.zeros([tf.shape(inputs[0])[0], self.config.hidden_size])
@@ -221,6 +197,15 @@ class RNN_QAModel(QA_Model):
             for tstep, current_sent in enumerate(inputs):
                 if tstep > 0:
                     scope.reuse_variables()
+                if type_layer == 'Context':
+                    current_sent = tf.matmul(self.context_padding[tstep], current_sent)
+                    ht = tf.matmul(self.context_padding[tstep], h)
+                    ct = tf.matmul(self.context_padding[tstep], c)
+                elif type_layer == 'Questions':
+                    current_sent = tf.matmul(self.questions_padding[tstep], current_sent)
+                    ht = tf.matmul(self.questions_padding[tstep], h)
+                    ct = tf.matmul(self.questions_padding[tstep], c)
+
                 Ui = tf.get_variable(
                     'Ui', [self.config.hidden_size, self.config.hidden_size])
                 Wi = tf.get_variable(
@@ -251,16 +236,65 @@ class RNN_QAModel(QA_Model):
                     'Wz', [self.config.embed_size, self.config.hidden_size])
                 bz = tf.get_variable(
                     'bz', [self.config.hidden_size])
-                z = tf.nn.tanh(tf.matmul(h, Uz) + tf.matmul(current_sent, Wz) + bz)
-                i = tf.nn.sigmoid(tf.matmul(h, Ui) + tf.matmul(current_sent, Wi) + tf.mul(pi, c) + bi)
-                f = tf.nn.sigmoid(tf.matmul(h, Uf) + tf.matmul(current_sent, Wf) + tf.mul(pf, c) + bf)
-                c = tf.mul(f,c) + tf.mul(i,z)
-                o = tf.nn.sigmoid(tf.matmul(h, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, c) + bo)
-                h = tf.mul(o, tf.nn.tanh(c))
+                z = tf.nn.tanh(tf.matmul(ht, Uz) + tf.matmul(current_sent, Wz) + bz)
+                i = tf.nn.sigmoid(tf.matmul(ht, Ui) + tf.matmul(current_sent, Wi) + tf.mul(pi, ct) + bi)
+                f = tf.nn.sigmoid(tf.matmul(ht, Uf) + tf.matmul(current_sent, Wf) + tf.mul(pf, ct) + bf)
+                ct = tf.mul(f,ct) + tf.mul(i,z)
+                o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, ct) + bo)
+                ht = tf.mul(o, tf.nn.tanh(ct))
+                if type_layer == 'Context':
+                    h = tf.concat(0, [ht, h[tf.shape(self.context_padding[tstep])[0]:,:]])
+                    c = tf.concat(0, [ct, c[tf.shape(self.context_padding[tstep])[0]:,:]])
+                elif type_layer == 'Questions':
+                    h = tf.concat(0, [ht, h[tf.shape(self.questions_padding[tstep])[0]:,:]])
+                    c = tf.concat(0, [ct, c[tf.shape(self.questions_padding[tstep])[0]:,:]])
         return h
 
+    def add_projection(self, rnn_outputs):
+        h_context = rnn_outputs[0]
+        h_questions = rnn_outputs[1]
+        
+        with tf.variable_scope('Projection-Layer', initializer=tf.contrib.layers.xavier_initializer()) as scope:
+            Uc = tf.get_variable('Uc',
+              [self.config.hidden_size, self.config.hidden_size])
+            bc = tf.get_variable('bc',
+              [self.config.hidden_size])
+            Uq = tf.get_variable('Uq',
+              [self.config.hidden_size, self.config.hidden_size])
+            bq = tf.get_variable('bq',
+              [self.config.hidden_size])
+            W = tf.get_variable('W',
+              [self.config.hidden_size, len(self.vocab)])
+            og1 = tf.matmul(h_questions, Uq) + bq
+            og2 = tf.matmul(h_context, Uc) + bc
+            og1 = tf.matmul(self.output_gates_placeholder1, og1)
+            og2 = tf.matmul(self.output_gates_placeholder2, og2)
+            output_gates = tf.sigmoid(og1 + og2)
+            outputs = tf.mul(tf.matmul(self.output_gates_placeholder2, h_context), output_gates)
+            outputs = tf.matmul(self.output_placeholder, outputs)
+            outputs = tf.matmul(outputs, W)
 
-    def run_epoch(self, session, data, train_op=None, verbose=10):
+        return outputs
+
+    def add_loss_op(self, output):
+        labels = tf.one_hot(self.answers_placeholder,
+            len(self.vocab),
+            on_value=1,
+            off_value=0,
+            axis=-1)
+        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(output, labels))
+        tf.add_to_collection('total_loss', cross_entropy)
+        loss = tf.add_n(tf.get_collection('total_loss'))
+
+        return loss
+
+    def add_training_op(self, loss):
+        optimizer = tf.train.AdamOptimizer(self.config.lr)
+        train_op = optimizer.minimize(loss)
+
+        return train_op
+    
+    def run_epoch(self, session, data, data_type=0, train_op=None, verbose=1):
         config = self.config
         if not train_op:
             train_op = tf.no_op()
@@ -278,6 +312,22 @@ class RNN_QAModel(QA_Model):
                 output_gates2[i][:,i] = 1
             output_gates2 = np.concatenate(output_gates2)
             output = np.concatenate([np.identity(len(questions)) for _ in range(len(context))], 1)
+            lengths_sent_context = self.config.lengths_sent_context[data_type][step]
+            lengths_sent_questions = self.config.lengths_sent_questions[data_type][step]
+            padding_lengths_context = [len([x for x in lengths_sent_context if x>=t])
+                               for t in range(1,self.config.len_sent_context+1)]
+            padding_lengths_questions = [len([x for x in lengths_sent_questions if x>=t])
+                               for t in range(1,self.config.len_sent_questions+1)]
+            context_padding = [np.concatenate([np.identity(padding_lengths_context[i]),
+                                               np.zeros((padding_lengths_context[i],
+                                                         len(context) - padding_lengths_context[i]))],
+                                              1)
+                               for i in range(self.config.len_sent_context)]
+            questions_padding = [np.concatenate([np.identity(padding_lengths_questions[i]),
+                                                 np.zeros((padding_lengths_questions[i],
+                                                           len(questions) - padding_lengths_questions[i]))],
+                                                1)
+                               for i in range(self.config.len_sent_questions)]
             
             feed = {self.context_placeholder: context,
                     self.questions_placeholder: questions,
@@ -285,6 +335,10 @@ class RNN_QAModel(QA_Model):
                     self.output_gates_placeholder1: output_gates1,
                     self.output_gates_placeholder2: output_gates2,
                     self.output_placeholder: output}
+            feed.update({k:v for k,v in [(self.context_padding[i], context_padding[i])
+                                         for i in range(self.config.len_sent_context)]})
+            feed.update({k:v for k,v in [(self.questions_padding[i], questions_padding[i])
+                                         for i in range(self.config.len_sent_questions)]})
             loss, _, pred = session.run(
                 [self.calculate_loss, train_op, self.predictions], feed_dict=feed)
             total_loss.append(loss)
@@ -317,12 +371,13 @@ def test_RNNLM():
             start = time.time()
             train_ce, train_accuracy = model.run_epoch(
                 session, model.encoded_train,
-                train_op=model.train_step)
+                data_type=0, train_op=model.train_step)
             print('Training cross-entropy: {}'.format(train_ce))
             print('Training accuracy: {}'.format(train_accuracy))
 
             valid_ce, valid_accuracy = model.run_epoch(
-                session, model.encoded_valid)
+                session, model.encoded_valid,
+                data_type=1)
             print('Validation cross-entropy: {}'.format(valid_ce))
             print('Validation accuracy: {}'.format(valid_accuracy))
 
@@ -336,7 +391,8 @@ def test_RNNLM():
         
         saver.restore(session, 'ptb_rnnlm.weights')    
         test_ce, test_accuracy = model.run_epoch(
-            session, model.encoded_test)
+            session, model.encoded_test,
+            data_type=2)
         print('=-=' * 5)
         print('Test cross-entropy: {}'.format(test_ce))
         print('Test accuracy: {}'.format(test_accuracy))
