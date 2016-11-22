@@ -16,8 +16,8 @@ class Config(object):
     embed_size = 300
     pretrained_embed = False
     hidden_size = 100
-    max_epochs = 100
-    early_stopping = 10
+    max_epochs = 500
+    early_stopping = 20
     lr = 1e-3
   
 
