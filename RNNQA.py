@@ -353,7 +353,7 @@ class RNN_QAModel(QA_Model):
             sys.stdout.write('\r')
         return np.sum(total_loss) / num_answers, pos_preds / num_answers
 
-def test_RNNLM():
+def test_RNNQA():
     config = Config()
     with tf.variable_scope('RNNLM') as scope:
         model = RNN_QAModel(config)
@@ -399,4 +399,4 @@ def test_RNNLM():
         print('=-=' * 5)
 
 if __name__ == "__main__":
-    test_RNNLM()
+    test_RNNQA()
