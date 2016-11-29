@@ -16,6 +16,7 @@ class Config(object):
     embed_size = 300
     pretrained_embed = False
     hidden_size = 100
+    num_hidden_layers = 2
     max_epochs = 500
     early_stopping = 20
     lr = 1e-3
@@ -191,64 +192,89 @@ class RNN_QAModel(QA_Model):
         return context, questions
 
     def add_model(self, inputs, type_layer):
-        with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
-            h = tf.zeros([tf.shape(inputs[0])[0], self.config.hidden_size])
-            c = h
-            for tstep, current_sent in enumerate(inputs):
-                if tstep > 0:
-                    scope.reuse_variables()
-                if type_layer == 'Context':
-                    current_sent = tf.matmul(self.context_padding[tstep], current_sent)
-                    ht = tf.matmul(self.context_padding[tstep], h)
-                    ct = tf.matmul(self.context_padding[tstep], c)
-                elif type_layer == 'Questions':
-                    current_sent = tf.matmul(self.questions_padding[tstep], current_sent)
-                    ht = tf.matmul(self.questions_padding[tstep], h)
-                    ct = tf.matmul(self.questions_padding[tstep], c)
+        hidden_states_old = inputs
+        for hidden_step in range(self.config.num_hidden_layers):
+            hidden_states_new = []
+            with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
+                h = tf.zeros([tf.shape(hidden_states_old[0])[0], self.config.hidden_size])
+                c = h
+                for tstep, current_sent in enumerate(hidden_states_old):
+                    if tstep > 0:
+                        scope.reuse_variables()
+                    if hidden_step == 0:
+                        if type_layer == 'Context':
+                            current_sent = tf.matmul(self.context_padding[tstep], current_sent)
+                            ht = tf.matmul(self.context_padding[tstep], h)
+                            ct = tf.matmul(self.context_padding[tstep], c)
+                        elif type_layer == 'Questions':
+                            current_sent = tf.matmul(self.questions_padding[tstep], current_sent)
+                            ht = tf.matmul(self.questions_padding[tstep], h)
+                            ct = tf.matmul(self.questions_padding[tstep], c)
+                    else:
+                        ht = h
+                        ct = c
 
-                Ui = tf.get_variable(
-                    'Ui', [self.config.hidden_size, self.config.hidden_size])
-                Wi = tf.get_variable(
-                    'Wi', [self.config.embed_size, self.config.hidden_size])
-                bi = tf.get_variable(
-                    'bi', [self.config.hidden_size])
-                pi = tf.get_variable(
-                    'pi', [self.config.hidden_size])
-                Uf = tf.get_variable(
-                    'Uf', [self.config.hidden_size, self.config.hidden_size])
-                Wf = tf.get_variable(
-                    'Wf', [self.config.embed_size, self.config.hidden_size])
-                bf = tf.get_variable(
-                    'bf', [self.config.hidden_size])
-                pf = tf.get_variable(
-                    'pf', [self.config.hidden_size])
-                Uo = tf.get_variable(
-                    'Uo', [self.config.hidden_size, self.config.hidden_size])
-                Wo = tf.get_variable(
-                    'Wo', [self.config.embed_size, self.config.hidden_size])
-                bo = tf.get_variable(
-                    'bo', [self.config.hidden_size])
-                po = tf.get_variable(
-                    'po', [self.config.hidden_size])
-                Uz = tf.get_variable(
-                    'Uz', [self.config.hidden_size, self.config.hidden_size])
-                Wz = tf.get_variable(
-                    'Wz', [self.config.embed_size, self.config.hidden_size])
-                bz = tf.get_variable(
-                    'bz', [self.config.hidden_size])
-                z = tf.nn.tanh(tf.matmul(ht, Uz) + tf.matmul(current_sent, Wz) + bz)
-                i = tf.nn.sigmoid(tf.matmul(ht, Ui) + tf.matmul(current_sent, Wi) + tf.mul(pi, ct) + bi)
-                f = tf.nn.sigmoid(tf.matmul(ht, Uf) + tf.matmul(current_sent, Wf) + tf.mul(pf, ct) + bf)
-                ct = tf.mul(f,ct) + tf.mul(i,z)
-                o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, ct) + bo)
-                ht = tf.mul(o, tf.nn.tanh(ct))
-                if type_layer == 'Context':
-                    h = tf.concat(0, [ht, h[tf.shape(self.context_padding[tstep])[0]:,:]])
-                    c = tf.concat(0, [ct, c[tf.shape(self.context_padding[tstep])[0]:,:]])
-                elif type_layer == 'Questions':
-                    h = tf.concat(0, [ht, h[tf.shape(self.questions_padding[tstep])[0]:,:]])
-                    c = tf.concat(0, [ct, c[tf.shape(self.questions_padding[tstep])[0]:,:]])
-        return h
+                    Ui = tf.get_variable(
+                        'Ui_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                    bi = tf.get_variable(
+                        'bi_l%s' % hidden_step, [self.config.hidden_size])
+                    pi = tf.get_variable(
+                        'pi_l%s' % hidden_step, [self.config.hidden_size])
+                    Uf = tf.get_variable(
+                        'Uf_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                    bf = tf.get_variable(
+                        'bf_l%s' % hidden_step, [self.config.hidden_size])
+                    pf = tf.get_variable(
+                        'pf_l%s' % hidden_step, [self.config.hidden_size])
+                    Uo = tf.get_variable(
+                        'Uo_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                    bo = tf.get_variable(
+                        'bo_l%s' % hidden_step, [self.config.hidden_size])
+                    po = tf.get_variable(
+                        'po_l%s' % hidden_step, [self.config.hidden_size])
+                    Uz = tf.get_variable(
+                        'Uz_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                    bz = tf.get_variable(
+                        'bz_l%s' % hidden_step, [self.config.hidden_size])
+                    if hidden_step == 0:
+                        Wi = tf.get_variable(
+                            'Wi_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
+                        Wf = tf.get_variable(
+                            'Wf_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
+                        Wo = tf.get_variable(
+                            'Wo_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
+                        Wz = tf.get_variable(
+                            'Wz_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
+                    else:
+                        Wi = tf.get_variable(
+                            'Wi_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                        Wf = tf.get_variable(
+                            'Wf_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                        Wo = tf.get_variable(
+                            'Wo_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                        Wz = tf.get_variable(
+                            'Wz_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
+                    z = tf.nn.tanh(tf.matmul(ht, Uz) + tf.matmul(current_sent, Wz) + bz)
+                    i = tf.nn.sigmoid(tf.matmul(ht, Ui) + tf.matmul(current_sent, Wi) + tf.mul(pi, ct) + bi)
+                    f = tf.nn.sigmoid(tf.matmul(ht, Uf) + tf.matmul(current_sent, Wf) + tf.mul(pf, ct) + bf)
+                    ct = tf.mul(f,ct) + tf.mul(i,z)
+                    o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, ct) + bo)
+                    ht = tf.mul(o, tf.nn.tanh(ct))
+
+                    if hidden_step == 0:
+                        if type_layer == 'Context':
+                            h = tf.concat(0, [ht, h[tf.shape(self.context_padding[tstep])[0]:,:]])
+                            c = tf.concat(0, [ct, c[tf.shape(self.context_padding[tstep])[0]:,:]])
+                        elif type_layer == 'Questions':
+                            h = tf.concat(0, [ht, h[tf.shape(self.questions_padding[tstep])[0]:,:]])
+                            c = tf.concat(0, [ct, c[tf.shape(self.questions_padding[tstep])[0]:,:]])
+                    else:
+                        h = ht
+                        c = ct
+
+                    hidden_states_new.append(h)
+            hidden_states_old = hidden_states_new
+        return hidden_states_new[-1]
 
     def add_projection(self, rnn_outputs):
         h_context = rnn_outputs[0]
@@ -380,11 +406,11 @@ def test_RNNQA():
                 data_type=1)
             print('Validation cross-entropy: {}'.format(valid_ce))
             print('Validation accuracy: {}'.format(valid_accuracy))
-
+            saver.save(session, './ptb_rnnlm.weights')
+            
             if valid_ce < best_val_ce:
                 best_val_ce = valid_ce
                 best_val_epoch = epoch
-                saver.save(session, './ptb_rnnlm.weights')
             if epoch - best_val_epoch > config.early_stopping:
                 break
             print('Total time: {}'.format(time.time() - start))
