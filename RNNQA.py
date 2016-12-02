@@ -14,12 +14,13 @@ import tensorflow as tf
 
 class Config(object):
     embed_size = 300
-    pretrained_embed = False
+    pretrained_embed = True
     hidden_size = 100
-    num_hidden_layers = 2
+    num_hidden_layers = 1
     max_epochs = 500
     early_stopping = 20
     lr = 1e-3
+    dropout = 0.8
   
 
 class QA_Model():
@@ -175,6 +176,7 @@ class RNN_QAModel(QA_Model):
             self.questions_padding.append(tf.placeholder(tf.float32,
                 shape=[None, None],
                 name='QuestionsPadding%s' % i))
+        self.dropout_placeholder = tf.placeholder(tf.float32, name='Dropout')
         
     def add_embedding(self):
         with tf.device('/cpu:0'):
@@ -192,6 +194,9 @@ class RNN_QAModel(QA_Model):
         return context, questions
 
     def add_model(self, inputs, type_layer):
+        with tf.variable_scope('InputDropout'):
+            inputs = [tf.nn.dropout(x, self.dropout_placeholder) for x in inputs]
+
         hidden_states_old = inputs
         for hidden_step in range(self.config.num_hidden_layers):
             hidden_states_new = []
@@ -274,6 +279,9 @@ class RNN_QAModel(QA_Model):
 
                     hidden_states_new.append(h)
             hidden_states_old = hidden_states_new
+
+        with tf.variable_scope('OutputDropout'):
+            hidden_states_new = [tf.nn.dropout(x, self.dropout_placeholder) for x in hidden_states_new]
         return hidden_states_new[-1]
 
     def add_projection(self, rnn_outputs):
@@ -322,8 +330,10 @@ class RNN_QAModel(QA_Model):
     
     def run_epoch(self, session, data, data_type=0, train_op=None, verbose=1):
         config = self.config
+        dp = config.dropout
         if not train_op:
             train_op = tf.no_op()
+            dp = 1
         total_steps = len(data)
         total_loss = []
         pos_preds = 0
@@ -360,7 +370,8 @@ class RNN_QAModel(QA_Model):
                     self.answers_placeholder: answers,
                     self.output_gates_placeholder1: output_gates1,
                     self.output_gates_placeholder2: output_gates2,
-                    self.output_placeholder: output}
+                    self.output_placeholder: output,
+                    self.dropout_placeholder: dp}
             feed.update({k:v for k,v in [(self.context_padding[i], context_padding[i])
                                          for i in range(self.config.len_sent_context)]})
             feed.update({k:v for k,v in [(self.questions_padding[i], questions_padding[i])
