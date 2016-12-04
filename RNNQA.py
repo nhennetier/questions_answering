@@ -18,7 +18,7 @@ class Config(object):
     hidden_size = 100
     num_hidden_layers = 1
     max_epochs = 500
-    early_stopping = 20
+    early_stopping = 50
     lr = 1e-3
     dropout = 0.8
   
@@ -404,6 +404,7 @@ def test_RNNQA():
     
         session.run(init)
         for epoch in range(config.max_epochs):
+            saver.restore(session, 'ptb_rnnlm.weights')
             print('Epoch {}'.format(epoch))
             start = time.time()
             train_ce, train_accuracy = model.run_epoch(
