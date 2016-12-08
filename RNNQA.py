@@ -1,4 +1,3 @@
-import getpass
 import sys
 import time
 import json
@@ -13,6 +12,7 @@ import tensorflow as tf
 
 
 class Config(object):
+    '''Hyperparameters'''
     embed_size = 300
     pretrained_embed = True
     hidden_size = 100
@@ -24,7 +24,9 @@ class Config(object):
   
 
 class QA_Model():
+    '''Preprocessing of raw data from the SQuAD.'''
     def preprocess(self, data):
+        '''First preprocessing: sentence tokenization and word tokenization with nltk.'''
         dataset = []
         words = []
         for article in data['data']:
@@ -44,6 +46,7 @@ class QA_Model():
         return words, dataset
 
     def encode_dataset(self, dataset):
+        '''Encode words (tokens to their ids) and sort sentences by decreasing length.'''
         encoded_dataset = [{'context': sorted([[self.vocab.encode(word.lower()) 
                                                 for word in sent]
                                                for sent in par['context']],
@@ -60,6 +63,8 @@ class QA_Model():
         return encoded_dataset
 
     def padding_dataset(self, dataset):
+        '''Addition of 0s at the end of sentences to fit in tf placeholders.
+        NB: these 0s will not be considered by the model'''
         encoded_dataset = [{'context': np.array([sent + [0 for _ in range(self.config.len_sent_context - len(sent))]
                                                  for sent in par['context']]),
                             'questions': np.array([sent + [0 for _ in range(self.config.len_sent_questions - len(sent))]
@@ -69,18 +74,23 @@ class QA_Model():
         return encoded_dataset
 
     def variable_len_sent_context(self, encoded_data):
+        '''Array of sentences' lengths from the different contexts.'''
         return [[len(sent) for sent in par['context']] for par in encoded_data]
 
     def variable_len_sent_questions(self, encoded_data):
+        '''Array of sentences' lengths from the different questions.'''
         return [[len(sent) for sent in par['questions']] for par in encoded_data]
 
     def max_len_sent_context(self, encoded_data):
+        '''Maximum length of a sentence within the contexts.'''
         return max([max([len(sent) for sent in par['context']]) for par in encoded_data])
         
     def max_len_sent_questions(self, encoded_data):
+        '''Maximum length of a sentence within the questions.'''
         return max([max([len(sent) for sent in par['questions']]) for par in encoded_data])
         
-    def load_data(self, debug=False):
+    def load_data(self):
+        #Loading of datasets from files
         with open('./data/train.json') as data_file:
             train = json.load(data_file)
         with open('./data/dev.json') as data_file:
@@ -89,9 +99,11 @@ class QA_Model():
         words_train, dataset_train = self.preprocess(train)
         words_dev, dataset_dev = self.preprocess(dev)
 
+        #Construction of vocabulary from both train and dev datasets
         self.vocab = Vocab()
         self.vocab.construct(words_train + words_dev)
 
+        #Mapping from tokens to vector representations in CommonCrawl glove. 
         if self.config.pretrained_embed:
             glove_vecs = {}
             with open('./data/glove.840B.300d.txt') as glove_file:
@@ -100,6 +112,7 @@ class QA_Model():
                     if len(vec) == 301 and vec[0] in self.vocab.word_to_index.keys():
                         glove_vecs[vec[0]] = [float(x) for x in vec[1:]]
 
+            #Creation of embedding matrix
             self.embeddings = np.zeros((len(self.vocab), 300))
             for ind, word in self.vocab.index_to_word.items():
                 try:
@@ -111,6 +124,7 @@ class QA_Model():
         self.encoded_train = self.encode_dataset(dataset_train)
         self.encoded_valid = self.encode_dataset(dataset_dev)
 
+        #Constants of the datasets
         self.config.len_sent_context = max(self.max_len_sent_context(self.encoded_train),
                                            self.max_len_sent_context(self.encoded_valid))
         self.config.len_sent_questions = max(self.max_len_sent_questions(self.encoded_train),
@@ -123,6 +137,7 @@ class QA_Model():
         self.encoded_train = self.padding_dataset(self.encoded_train)
         self.encoded_valid = self.padding_dataset(self.encoded_valid)
         
+        #Dev/Test split
         n = floor(len(self.encoded_valid)/2)
         self.encoded_test = self.encoded_valid[n:]
         self.config.lengths_sent_context.append(self.config.lengths_sent_context[1][n:])
@@ -133,21 +148,27 @@ class QA_Model():
 
 
 class RNN_QAModel(QA_Model):
+    '''Questions Answering RNN model with LSTM cells.'''
     def __init__(self, config):
         self.config = config
-        self.load_data(debug=False)
+        self.load_data()
+
+        #Construction of the computational graph
         self.add_placeholders()
         self.inputs = self.add_embedding()
+        #Outputs for both context and questions
         self.rnn_outputs = (self.add_model(self.inputs[0], 'Context'),
                             self.add_model(self.inputs[1], 'Questions'))
         self.outputs = self.add_projection(self.rnn_outputs)
-        
+        #Predictions of the model
         self.predictions = tf.nn.softmax(tf.cast(self.outputs, tf.float64))
+        #Optimization step
         self.calculate_loss = self.add_loss_op(self.outputs)
         self.train_step = self.add_training_op(self.calculate_loss)
 
 
     def add_placeholders(self):
+        #Placeholders for data: context, questions and answers
         self.context_placeholder = tf.placeholder(tf.int32,
             shape=[None, self.config.len_sent_context],
             name='Context')
@@ -157,6 +178,10 @@ class RNN_QAModel(QA_Model):
         self.answers_placeholder = tf.placeholder(tf.int32,
             shape=[None],
             name='Answers')
+
+        self.dropout_placeholder = tf.placeholder(tf.float32, name='Dropout')
+
+        #Placeholders for helpers: only intended to make calculations with dynamic shapes.
         self.output_gates_placeholder1 = tf.placeholder(tf.float32,
             shape=[None, None],
             name='OutputGates1')
@@ -166,6 +191,8 @@ class RNN_QAModel(QA_Model):
         self.output_placeholder = tf.placeholder(tf.float32,
             shape=[None, None],
             name='Output')
+
+        #Placeholders for padding: allow to forget 0s added within the dataset
         self.context_padding = []
         for i in range(self.config.len_sent_context):
             self.context_padding.append(tf.placeholder(tf.float32,
@@ -176,9 +203,9 @@ class RNN_QAModel(QA_Model):
             self.questions_padding.append(tf.placeholder(tf.float32,
                 shape=[None, None],
                 name='QuestionsPadding%s' % i))
-        self.dropout_placeholder = tf.placeholder(tf.float32, name='Dropout')
         
     def add_embedding(self):
+        '''Replace tokens (ids) by their vector representations'''
         with tf.device('/cpu:0'):
             if not self.config.pretrained_embed:
                 self.embeddings = tf.get_variable('Embedding',
@@ -194,18 +221,27 @@ class RNN_QAModel(QA_Model):
         return context, questions
 
     def add_model(self, inputs, type_layer):
+        '''Construction of the RNN model with LSTM cells.
+        Arguments:
+            - type_layer: should be 'Context' or 'Questions'
+        '''
+        #Dropout for inputs
         with tf.variable_scope('InputDropout'):
             inputs = [tf.nn.dropout(x, self.dropout_placeholder) for x in inputs]
 
         hidden_states_old = inputs
         for hidden_step in range(self.config.num_hidden_layers):
             hidden_states_new = []
+            #LSTM Cell
             with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
+                #Initialization of hidden states with 0s
                 h = tf.zeros([tf.shape(hidden_states_old[0])[0], self.config.hidden_size])
                 c = h
                 for tstep, current_sent in enumerate(hidden_states_old):
                     if tstep > 0:
                         scope.reuse_variables()
+                    #For the first LSTM layer, we need to remove the 0s added to the inputs (padding).
+                    #Does not apply for later layers.
                     if hidden_step == 0:
                         if type_layer == 'Context':
                             current_sent = tf.matmul(self.context_padding[tstep], current_sent)
@@ -266,6 +302,8 @@ class RNN_QAModel(QA_Model):
                     o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, ct) + bo)
                     ht = tf.mul(o, tf.nn.tanh(ct))
 
+                    #For the first LSTM layer, we only update the hidden states from non-0 inputs (padding).
+                    #Does not apply for later layers.
                     if hidden_step == 0:
                         if type_layer == 'Context':
                             h = tf.concat(0, [ht, h[tf.shape(self.context_padding[tstep])[0]:,:]])
@@ -280,11 +318,13 @@ class RNN_QAModel(QA_Model):
                     hidden_states_new.append(h)
             hidden_states_old = hidden_states_new
 
+        #Dropout for outputs
         with tf.variable_scope('OutputDropout'):
             hidden_states_new = [tf.nn.dropout(x, self.dropout_placeholder) for x in hidden_states_new]
         return hidden_states_new[-1]
 
     def add_projection(self, rnn_outputs):
+        '''Compute the probabilities of answers for each token from vocabulary.'''
         h_context = rnn_outputs[0]
         h_questions = rnn_outputs[1]
         
@@ -311,6 +351,7 @@ class RNN_QAModel(QA_Model):
         return outputs
 
     def add_loss_op(self, output):
+        '''Computation of cross-entropy error.'''
         labels = tf.one_hot(self.answers_placeholder,
             len(self.vocab),
             on_value=1,
@@ -329,19 +370,32 @@ class RNN_QAModel(QA_Model):
         return train_op
     
     def run_epoch(self, session, data, data_type=0, train_op=None, verbose=1):
+        '''Runs the model for an entire dataset.
+        Arguments:
+            - data_type: 0 for training, 1 for dev and 2 for test
+            - train_op: None for no backprop, self.train_step for backprop
+        Returns:
+            - Cross-entropy loss
+            - Accuracy
+        '''
         config = self.config
         dp = config.dropout
         if not train_op:
             train_op = tf.no_op()
             dp = 1
+
         total_steps = len(data)
         total_loss = []
         pos_preds = 0
         num_answers = 0
+
+        #Runs the model for each whole context and its q&a
         for step, paragraph in enumerate(data):
             context = paragraph['context']
             questions = paragraph['questions']
             answers = paragraph['answers']
+
+            #Computation of helper for dynamic shapes management
             output_gates1 = np.concatenate([np.identity(len(questions)) for _ in range(len(context))])
             output_gates2 = [np.zeros((len(questions), len(context))) for _ in range(len(context))]
             for i in range(len(context)):
@@ -376,16 +430,22 @@ class RNN_QAModel(QA_Model):
                                          for i in range(self.config.len_sent_context)]})
             feed.update({k:v for k,v in [(self.questions_padding[i], questions_padding[i])
                                          for i in range(self.config.len_sent_questions)]})
+
+            #Runs the model with forward pass (and backprop if train_op)
             loss, _, pred = session.run(
                 [self.calculate_loss, train_op, self.predictions], feed_dict=feed)
             total_loss.append(loss)
+
+            #Predictions and accuracy
             pred = np.argmax(pred, 1)
             pos_preds += np.sum(pred==answers)
             num_answers += len(answers)
+
             if verbose and step % verbose == 0:
                 sys.stdout.write('\r{} / {} : pp = {}'.format(
                     step, total_steps, np.sum(total_loss) / num_answers))
                 sys.stdout.flush()
+
         if verbose:
             sys.stdout.write('\r')
         return np.sum(total_loss) / num_answers, pos_preds / num_answers
@@ -407,6 +467,7 @@ def test_RNNQA():
             saver.restore(session, 'ptb_rnnlm.weights')
             print('Epoch {}'.format(epoch))
             start = time.time()
+
             train_ce, train_accuracy = model.run_epoch(
                 session, model.encoded_train,
                 data_type=0, train_op=model.train_step)
@@ -420,6 +481,7 @@ def test_RNNQA():
             print('Validation accuracy: {}'.format(valid_accuracy))
             saver.save(session, './ptb_rnnlm.weights')
             
+            #Run additional epochs while cross-entropy improving on dev dataset
             if valid_ce < best_val_ce:
                 best_val_ce = valid_ce
                 best_val_epoch = epoch
@@ -427,6 +489,7 @@ def test_RNNQA():
                 break
             print('Total time: {}'.format(time.time() - start))
         
+        #Final run on test dataset
         saver.restore(session, 'ptb_rnnlm.weights')    
         test_ce, test_accuracy = model.run_epoch(
             session, model.encoded_test,

@@ -3,6 +3,7 @@ from collections import defaultdict
 import numpy as np
 
 class Vocab(object):
+    '''Class for construction of vocabulary dictionnaries.'''
     def __init__(self):
         self.word_to_index = {}
         self.index_to_word = {}
