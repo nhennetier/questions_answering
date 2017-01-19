@@ -25,6 +25,13 @@ class Config(object):
 
 class QA_Model():
     '''Preprocessing of raw data from the SQuAD.'''
+    def context_parser(self, old_context):
+        new_context = []
+        old_context = sent_tokenize(old_context)
+        for sent in old_context:
+            new_context += sent.replace(':', ';').split(";")
+        return new_context
+    
     def preprocess(self, data):
         '''First preprocessing: sentence tokenization and word tokenization with nltk.'''
         dataset = []
@@ -36,7 +43,7 @@ class QA_Model():
                         'answer': question['answers'][0]['text']}
                        for question in par['qas']
                        if len(word_tokenize(question['answers'][0]['text']))==1]
-                context = sent_tokenize(par['context'])
+                context = self.context_parser(par['context'])
                 context = [word_tokenize(sent) for sent in context]
                 words += sum([question['question'] + [question['answer']] for question in qas], [])
                 words += sum(context, [])
@@ -161,7 +168,7 @@ class RNN_QAModel(QA_Model):
                             self.add_model(self.inputs[1], 'Questions'))
         self.outputs = self.add_projection(self.rnn_outputs)
         #Predictions of the model
-        self.predictions = tf.nn.softmax(tf.cast(self.outputs, tf.float64))
+        self.predictions = tf.cast(self.outputs, tf.float64)
         #Optimization step
         self.calculate_loss = self.add_loss_op(self.outputs)
         self.train_step = self.add_training_op(self.calculate_loss)
@@ -338,7 +345,7 @@ class RNN_QAModel(QA_Model):
             bq = tf.get_variable('bq',
               [self.config.hidden_size])
             W = tf.get_variable('W',
-              [self.config.hidden_size, len(self.vocab)])
+              [self.config.hidden_size, self.config.embed_size])
             og1 = tf.matmul(h_questions, Uq) + bq
             og2 = tf.matmul(h_context, Uc) + bc
             og1 = tf.matmul(self.output_gates_placeholder1, og1)
@@ -352,13 +359,10 @@ class RNN_QAModel(QA_Model):
 
     def add_loss_op(self, output):
         '''Computation of cross-entropy error.'''
-        labels = tf.one_hot(self.answers_placeholder,
-            len(self.vocab),
-            on_value=1,
-            off_value=0,
-            axis=-1)
-        cross_entropy = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(output, labels))
-        tf.add_to_collection('total_loss', cross_entropy)
+        embed_answers = tf.nn.embedding_lookup(self.embeddings,
+                                               self.answers_placeholder)
+        loss = tf.reduce_sum(tf.nn.l2_loss(output - embed_answers))
+        tf.add_to_collection('total_loss', loss)
         loss = tf.add_n(tf.get_collection('total_loss'))
 
         return loss
@@ -432,14 +436,17 @@ class RNN_QAModel(QA_Model):
                                          for i in range(self.config.len_sent_questions)]})
 
             #Runs the model with forward pass (and backprop if train_op)
-            loss, _, pred = session.run(
+            loss, _, predictions = session.run(
                 [self.calculate_loss, train_op, self.predictions], feed_dict=feed)
             total_loss.append(loss)
 
             #Predictions and accuracy
-            pred = np.argmax(pred, 1)
-            pos_preds += np.sum(pred==answers)
-            num_answers += len(answers)
+            for i in range(len(predictions)):
+                pred = predictions[i]
+                ans = answers[i]
+                pred = np.argmin(np.sum((pred - self.embeddings)**2, 1))
+                pos_preds += (pred == ans)
+                num_answers += 1
 
             if verbose and step % verbose == 0:
                 sys.stdout.write('\r{} / {} : pp = {}'.format(
@@ -464,7 +471,6 @@ def test_RNNQA():
     
         session.run(init)
         for epoch in range(config.max_epochs):
-            saver.restore(session, 'ptb_rnnlm.weights')
             print('Epoch {}'.format(epoch))
             start = time.time()
 
