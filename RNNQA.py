@@ -222,9 +222,9 @@ class RNN_QAModel(QA_Model):
                                                    self.context_placeholder)
             embed_questions = tf.nn.embedding_lookup(self.embeddings,
                                                      self.questions_placeholder)
-            context = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_context, embed_context)]
-            questions = [tf.squeeze(x, [1]) for x in tf.split(1, self.config.len_sent_questions, embed_questions)]
-          
+            context = [tf.squeeze(x, [1]) for x in tf.split(embed_context, self.config.len_sent_context, 1)]
+            questions = [tf.squeeze(x, [1]) for x in tf.split(embed_questions, self.config.len_sent_questions, 1)]
+        
         return context, questions
 
     def add_model(self, inputs, type_layer):
@@ -303,21 +303,21 @@ class RNN_QAModel(QA_Model):
                         Wz = tf.get_variable(
                             'Wz_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
                     z = tf.nn.tanh(tf.matmul(ht, Uz) + tf.matmul(current_sent, Wz) + bz)
-                    i = tf.nn.sigmoid(tf.matmul(ht, Ui) + tf.matmul(current_sent, Wi) + tf.mul(pi, ct) + bi)
-                    f = tf.nn.sigmoid(tf.matmul(ht, Uf) + tf.matmul(current_sent, Wf) + tf.mul(pf, ct) + bf)
-                    ct = tf.mul(f,ct) + tf.mul(i,z)
-                    o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.mul(po, ct) + bo)
-                    ht = tf.mul(o, tf.nn.tanh(ct))
+                    i = tf.nn.sigmoid(tf.matmul(ht, Ui) + tf.matmul(current_sent, Wi) + tf.multiply(pi, ct) + bi)
+                    f = tf.nn.sigmoid(tf.matmul(ht, Uf) + tf.matmul(current_sent, Wf) + tf.multiply(pf, ct) + bf)
+                    ct = tf.multiply(f,ct) + tf.multiply(i,z)
+                    o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.multiply(po, ct) + bo)
+                    ht = tf.multiply(o, tf.nn.tanh(ct))
 
                     #For the first LSTM layer, we only update the hidden states from non-0 inputs (padding).
                     #Does not apply for later layers.
                     if hidden_step == 0:
                         if type_layer == 'Context':
-                            h = tf.concat(0, [ht, h[tf.shape(self.context_padding[tstep])[0]:,:]])
-                            c = tf.concat(0, [ct, c[tf.shape(self.context_padding[tstep])[0]:,:]])
+                            h = tf.concat([ht, h[tf.shape(self.context_padding[tstep])[0]:,:]], 0)
+                            c = tf.concat([ct, c[tf.shape(self.context_padding[tstep])[0]:,:]], 0)
                         elif type_layer == 'Questions':
-                            h = tf.concat(0, [ht, h[tf.shape(self.questions_padding[tstep])[0]:,:]])
-                            c = tf.concat(0, [ct, c[tf.shape(self.questions_padding[tstep])[0]:,:]])
+                            h = tf.concat([ht, h[tf.shape(self.questions_padding[tstep])[0]:,:]], 0)
+                            c = tf.concat([ct, c[tf.shape(self.questions_padding[tstep])[0]:,:]], 0)
                     else:
                         h = ht
                         c = ct
@@ -351,7 +351,7 @@ class RNN_QAModel(QA_Model):
             og1 = tf.matmul(self.output_gates_placeholder1, og1)
             og2 = tf.matmul(self.output_gates_placeholder2, og2)
             output_gates = tf.sigmoid(og1 + og2)
-            outputs = tf.mul(tf.matmul(self.output_gates_placeholder2, h_context), output_gates)
+            outputs = tf.multiply(tf.matmul(self.output_gates_placeholder2, h_context), output_gates)
             outputs = tf.matmul(self.output_placeholder, outputs)
             outputs = tf.matmul(outputs, W)
 
@@ -462,15 +462,16 @@ def test_RNNQA():
     with tf.variable_scope('RNNLM') as scope:
         model = RNN_QAModel(config)
 
-    init = tf.initialize_all_variables()
+    init = tf.global_variables_initializer()
     saver = tf.train.Saver()
 
-    with tf.Session() as session:
+    with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=10)) as session:
         best_val_ce = float('inf')
         best_val_epoch = 0
     
         session.run(init)
         for epoch in range(config.max_epochs):
+            saver.restore(session, 'ptb_rnnlm.weights')
             print('Epoch {}'.format(epoch))
             start = time.time()
 
@@ -496,7 +497,7 @@ def test_RNNQA():
             print('Total time: {}'.format(time.time() - start))
         
         #Final run on test dataset
-        saver.restore(session, 'ptb_rnnlm.weights')    
+        saver.restore(session, 'ptb_rnnlm.weights')
         test_ce, test_accuracy = model.run_epoch(
             session, model.encoded_test,
             data_type=2)
