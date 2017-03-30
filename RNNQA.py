@@ -1,6 +1,8 @@
 import sys
 import time
 import json
+from os.path import join as pjoin
+from shutil import copyfile
 
 import numpy as np
 from math import floor
@@ -9,6 +11,7 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 from utils import Vocab
 
 import tensorflow as tf
+from tensorflow.contrib.rnn import static_rnn, static_bidirectional_rnn, GRUCell, LSTMCell, MultiRNNCell
 
 
 class Config(object):
@@ -72,29 +75,36 @@ class QA_Model():
     def padding_dataset(self, dataset):
         '''Addition of 0s at the end of sentences to fit in tf placeholders.
         NB: these 0s will not be considered by the model'''
-        encoded_dataset = [{'context': np.array([sent + [0 for _ in range(self.config.len_sent_context - len(sent))]
-                                                 for sent in par['context']]),
-                            'questions': np.array([sent + [0 for _ in range(self.config.len_sent_questions - len(sent))]
-                                                   for sent in par['questions']]),
+        encoded_dataset = [{'context': np.array([sent + [0 for i in range(self.config.len_sent_context - len(sent))]
+                                                 for sent in par['context']] \
+                                                + [[0 for i in range(self.config.len_sent_context)]
+                                                   for j in range(self.config.len_context - len(par['context']))]),
+                            'questions': np.array([sent + [0 for i in range(self.config.len_sent_questions - len(sent))]
+                                                   for sent in par['questions']] \
+                                                  + [[0 for i in range(self.config.len_sent_questions)]
+                                                     for j in range(self.config.len_questions - len(par['questions']))]),
                             'answers': np.array(par['answers'])
                            } for par in dataset]
         return encoded_dataset
 
     def variable_len_sent_context(self, encoded_data):
         '''Array of sentences' lengths from the different contexts.'''
-        return [[len(sent) for sent in par['context']] for par in encoded_data]
+        return [[len(sent) for sent in par['context']] \
+                + [0 for _ in range(self.config.len_context - len(par['context']))] \
+                for par in encoded_data]
 
     def variable_len_sent_questions(self, encoded_data):
         '''Array of sentences' lengths from the different questions.'''
-        return [[len(sent) for sent in par['questions']] for par in encoded_data]
+        return [[len(sent) for sent in par['questions']] \
+                + [0 for _ in range(self.config.len_questions - len(par['questions']))] \
+                for par in encoded_data]
 
-    def max_len_sent_context(self, encoded_data):
+    def max_len_sent(self, encoded_data, type_data):
         '''Maximum length of a sentence within the contexts.'''
-        return max([max([len(sent) for sent in par['context']]) for par in encoded_data])
+        return max([max([len(sent) for sent in par[type_data]]) for par in encoded_data])
         
-    def max_len_sent_questions(self, encoded_data):
-        '''Maximum length of a sentence within the questions.'''
-        return max([max([len(sent) for sent in par['questions']]) for par in encoded_data])
+    def max_len(self, encoded_data, type_data):
+        return max([len(par[type_data]) for par in encoded_data])
         
     def load_data(self):
         #Loading of datasets from files
@@ -113,7 +123,7 @@ class QA_Model():
         #Mapping from tokens to vector representations in CommonCrawl glove. 
         if self.config.pretrained_embed:
             glove_vecs = {}
-            with open('./data/glove.840B.300d.txt') as glove_file:
+            with open('/Users/nicolashennetier/pretrained_embeddings/glove.840B.300d.txt') as glove_file:
                 for line in glove_file:
                     vec = line.split()
                     if len(vec) == 301 and vec[0] in self.vocab.word_to_index.keys():
@@ -132,10 +142,15 @@ class QA_Model():
         self.encoded_valid = self.encode_dataset(dataset_dev)
 
         #Constants of the datasets
-        self.config.len_sent_context = max(self.max_len_sent_context(self.encoded_train),
-                                           self.max_len_sent_context(self.encoded_valid))
-        self.config.len_sent_questions = max(self.max_len_sent_questions(self.encoded_train),
-                                           self.max_len_sent_questions(self.encoded_valid))
+        self.config.len_sent_context = max(self.max_len_sent(self.encoded_train, type_data='context'),
+                                           self.max_len_sent(self.encoded_valid, type_data='context'))
+        self.config.len_sent_questions = max(self.max_len_sent(self.encoded_train, type_data='questions'),
+                                             self.max_len_sent(self.encoded_valid, type_data='questions'))
+        self.config.len_context = max(self.max_len(self.encoded_train, type_data='context'),
+                                       self.max_len(self.encoded_valid, type_data='context'))
+        self.config.len_questions = max(self.max_len(self.encoded_train, type_data='questions'),
+                                         self.max_len(self.encoded_valid, type_data='questions'))
+
         self.config.lengths_sent_context = [self.variable_len_sent_context(self.encoded_train),
                                             self.variable_len_sent_context(self.encoded_valid)]
         self.config.lengths_sent_questions = [self.variable_len_sent_questions(self.encoded_train),
@@ -177,39 +192,26 @@ class RNN_QAModel(QA_Model):
     def add_placeholders(self):
         #Placeholders for data: context, questions and answers
         self.context_placeholder = tf.placeholder(tf.int32,
-            shape=[None, self.config.len_sent_context],
+            shape=[self.config.len_context, self.config.len_sent_context],
             name='Context')
         self.questions_placeholder = tf.placeholder(tf.int32,
-            shape=[None, self.config.len_sent_questions],
+            shape=[self.config.len_questions, self.config.len_sent_questions],
             name='Questions')
         self.answers_placeholder = tf.placeholder(tf.int32,
             shape=[None],
             name='Answers')
-
+        
         self.dropout_placeholder = tf.placeholder(tf.float32, name='Dropout')
-
-        #Placeholders for helpers: only intended to make calculations with dynamic shapes.
-        self.output_gates_placeholder1 = tf.placeholder(tf.float32,
-            shape=[None, None],
-            name='OutputGates1')
-        self.output_gates_placeholder2 = tf.placeholder(tf.float32,
-            shape=[None, None],
-            name='OutputGates2')
+        
+        self.context_len_placeholder = tf.placeholder(tf.int32,
+            shape=[self.config.len_context],
+            name='Len-Context')
+        self.questions_len_placeholder = tf.placeholder(tf.int32,
+            shape=[self.config.len_questions],
+            name='Len-Questions')
         self.output_placeholder = tf.placeholder(tf.float32,
-            shape=[None, None],
+            shape=[None, self.config.len_questions],
             name='Output')
-
-        #Placeholders for padding: allow to forget 0s added within the dataset
-        self.context_padding = []
-        for i in range(self.config.len_sent_context):
-            self.context_padding.append(tf.placeholder(tf.float32,
-                shape=[None, None],
-                name='ContextPadding%s' % i))
-        self.questions_padding = []
-        for i in range(self.config.len_sent_questions):
-            self.questions_padding.append(tf.placeholder(tf.float32,
-                shape=[None, None],
-                name='QuestionsPadding%s' % i))
         
     def add_embedding(self):
         '''Replace tokens (ids) by their vector representations'''
@@ -236,124 +238,56 @@ class RNN_QAModel(QA_Model):
         with tf.variable_scope('InputDropout'):
             inputs = [tf.nn.dropout(x, self.dropout_placeholder) for x in inputs]
 
-        hidden_states_old = inputs
-        for hidden_step in range(self.config.num_hidden_layers):
-            hidden_states_new = []
-            #LSTM Cell
-            with tf.variable_scope('RNN_'+type_layer, initializer=tf.contrib.layers.xavier_initializer()) as scope:
-                #Initialization of hidden states with 0s
-                h = tf.zeros([tf.shape(hidden_states_old[0])[0], self.config.hidden_size])
-                c = h
-                for tstep, current_sent in enumerate(hidden_states_old):
-                    if tstep > 0:
-                        scope.reuse_variables()
-                    #For the first LSTM layer, we need to remove the 0s added to the inputs (padding).
-                    #Does not apply for later layers.
-                    if hidden_step == 0:
-                        if type_layer == 'Context':
-                            current_sent = tf.matmul(self.context_padding[tstep], current_sent)
-                            ht = tf.matmul(self.context_padding[tstep], h)
-                            ct = tf.matmul(self.context_padding[tstep], c)
-                        elif type_layer == 'Questions':
-                            current_sent = tf.matmul(self.questions_padding[tstep], current_sent)
-                            ht = tf.matmul(self.questions_padding[tstep], h)
-                            ct = tf.matmul(self.questions_padding[tstep], c)
-                    else:
-                        ht = h
-                        ct = c
+        with tf.variable_scope('Hidden-Layers', initializer=tf.contrib.layers.xavier_initializer()) as scope:
+            if type_layer == 'Questions':
+                scope.reuse_variables()
 
-                    Ui = tf.get_variable(
-                        'Ui_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                    bi = tf.get_variable(
-                        'bi_l%s' % hidden_step, [self.config.hidden_size])
-                    pi = tf.get_variable(
-                        'pi_l%s' % hidden_step, [self.config.hidden_size])
-                    Uf = tf.get_variable(
-                        'Uf_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                    bf = tf.get_variable(
-                        'bf_l%s' % hidden_step, [self.config.hidden_size])
-                    pf = tf.get_variable(
-                        'pf_l%s' % hidden_step, [self.config.hidden_size])
-                    Uo = tf.get_variable(
-                        'Uo_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                    bo = tf.get_variable(
-                        'bo_l%s' % hidden_step, [self.config.hidden_size])
-                    po = tf.get_variable(
-                        'po_l%s' % hidden_step, [self.config.hidden_size])
-                    Uz = tf.get_variable(
-                        'Uz_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                    bz = tf.get_variable(
-                        'bz_l%s' % hidden_step, [self.config.hidden_size])
-                    if hidden_step == 0:
-                        Wi = tf.get_variable(
-                            'Wi_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
-                        Wf = tf.get_variable(
-                            'Wf_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
-                        Wo = tf.get_variable(
-                            'Wo_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
-                        Wz = tf.get_variable(
-                            'Wz_l%s' % hidden_step, [self.config.embed_size, self.config.hidden_size])
-                    else:
-                        Wi = tf.get_variable(
-                            'Wi_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                        Wf = tf.get_variable(
-                            'Wf_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                        Wo = tf.get_variable(
-                            'Wo_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                        Wz = tf.get_variable(
-                            'Wz_l%s' % hidden_step, [self.config.hidden_size, self.config.hidden_size])
-                    z = tf.nn.tanh(tf.matmul(ht, Uz) + tf.matmul(current_sent, Wz) + bz)
-                    i = tf.nn.sigmoid(tf.matmul(ht, Ui) + tf.matmul(current_sent, Wi) + tf.multiply(pi, ct) + bi)
-                    f = tf.nn.sigmoid(tf.matmul(ht, Uf) + tf.matmul(current_sent, Wf) + tf.multiply(pf, ct) + bf)
-                    ct = tf.multiply(f,ct) + tf.multiply(i,z)
-                    o = tf.nn.sigmoid(tf.matmul(ht, Uo) + tf.matmul(current_sent, Wo) + tf.multiply(po, ct) + bo)
-                    ht = tf.multiply(o, tf.nn.tanh(ct))
+            initializer = tf.random_uniform_initializer(-1,1) 
+            cell = LSTMCell(self.config.hidden_size, initializer=initializer)
 
-                    #For the first LSTM layer, we only update the hidden states from non-0 inputs (padding).
-                    #Does not apply for later layers.
-                    if hidden_step == 0:
-                        if type_layer == 'Context':
-                            h = tf.concat([ht, h[tf.shape(self.context_padding[tstep])[0]:,:]], 0)
-                            c = tf.concat([ct, c[tf.shape(self.context_padding[tstep])[0]:,:]], 0)
-                        elif type_layer == 'Questions':
-                            h = tf.concat([ht, h[tf.shape(self.questions_padding[tstep])[0]:,:]], 0)
-                            c = tf.concat([ct, c[tf.shape(self.questions_padding[tstep])[0]:,:]], 0)
-                    else:
-                        h = ht
-                        c = ct
+            if type_layer == 'Context':
+                initial_state = cell.zero_state(self.config.len_context, tf.float32)
+                outputs, hidden_state = static_rnn(cell,
+                                                   inputs,
+                                                   initial_state=initial_state,
+                                                   sequence_length=self.context_len_placeholder)
+            elif type_layer == "Questions":
+                initial_state = cell.zero_state(self.config.len_questions, tf.float32)
+                outputs, hidden_state = static_rnn(cell,
+                                                   inputs,
+                                                   initial_state=initial_state,
+                                                   sequence_length=self.questions_len_placeholder)
 
-                    hidden_states_new.append(h)
-            hidden_states_old = hidden_states_new
-
-        #Dropout for outputs
-        with tf.variable_scope('OutputDropout'):
-            hidden_states_new = [tf.nn.dropout(x, self.dropout_placeholder) for x in hidden_states_new]
-        return hidden_states_new[-1]
+        return outputs[-1]
 
     def add_projection(self, rnn_outputs):
         '''Compute the probabilities of answers for each token from vocabulary.'''
         h_context = rnn_outputs[0]
         h_questions = rnn_outputs[1]
+
+        h_questions = tf.split(h_questions, self.config.len_questions, 0)
         
         with tf.variable_scope('Projection-Layer', initializer=tf.contrib.layers.xavier_initializer()) as scope:
             Uc = tf.get_variable('Uc',
               [self.config.hidden_size, self.config.hidden_size])
-            bc = tf.get_variable('bc',
-              [self.config.hidden_size])
             Uq = tf.get_variable('Uq',
               [self.config.hidden_size, self.config.hidden_size])
-            bq = tf.get_variable('bq',
+            b = tf.get_variable('b',
               [self.config.hidden_size])
-            W = tf.get_variable('W',
+            Wo = tf.get_variable('Wo',
               [self.config.hidden_size, self.config.embed_size])
-            og1 = tf.matmul(h_questions, Uq) + bq
-            og2 = tf.matmul(h_context, Uc) + bc
-            og1 = tf.matmul(self.output_gates_placeholder1, og1)
-            og2 = tf.matmul(self.output_gates_placeholder2, og2)
-            output_gates = tf.sigmoid(og1 + og2)
-            outputs = tf.multiply(tf.matmul(self.output_gates_placeholder2, h_context), output_gates)
+            bo = tf.get_variable('bo',
+              [self.config.embed_size])
+
+            outputs = []
+            for question in h_questions:
+                output_gates = tf.sigmoid(tf.matmul(h_context, Uc) + tf.matmul(question, Uq) + b)
+                gated_context = tf.multiply(h_context, output_gates)
+                outputs.append(tf.reduce_sum(gated_context, axis=0))
+            
+            outputs = tf.stack(outputs, axis=0)
             outputs = tf.matmul(self.output_placeholder, outputs)
-            outputs = tf.matmul(outputs, W)
+            outputs = tf.matmul(outputs, Wo) + bo
 
         return outputs
 
@@ -362,13 +296,13 @@ class RNN_QAModel(QA_Model):
         embed_answers = tf.nn.embedding_lookup(self.embeddings,
                                                self.answers_placeholder)
         loss = tf.reduce_sum(tf.nn.l2_loss(output - embed_answers))
-        tf.add_to_collection('total_loss', loss)
-        loss = tf.add_n(tf.get_collection('total_loss'))
-
         return loss
 
     def add_training_op(self, loss):
-        optimizer = tf.train.AdamOptimizer(self.config.lr)
+        optimizer = tf.train.RMSPropOptimizer(self.config.lr,
+                                              decay=0.99,
+                                              momentum=0.5,
+                                              centered=True)
         train_op = optimizer.minimize(loss)
 
         return train_op
@@ -399,41 +333,20 @@ class RNN_QAModel(QA_Model):
             questions = paragraph['questions']
             answers = paragraph['answers']
 
-            #Computation of helper for dynamic shapes management
-            output_gates1 = np.concatenate([np.identity(len(questions)) for _ in range(len(context))])
-            output_gates2 = [np.zeros((len(questions), len(context))) for _ in range(len(context))]
-            for i in range(len(context)):
-                output_gates2[i][:,i] = 1
-            output_gates2 = np.concatenate(output_gates2)
-            output = np.concatenate([np.identity(len(questions)) for _ in range(len(context))], 1)
+            output_padding = np.concatenate([np.identity(len(answers)),
+                                             np.zeros((len(answers), config.len_questions - len(answers)))],
+                                            axis=1)
+            
             lengths_sent_context = self.config.lengths_sent_context[data_type][step]
             lengths_sent_questions = self.config.lengths_sent_questions[data_type][step]
-            padding_lengths_context = [len([x for x in lengths_sent_context if x>=t])
-                               for t in range(1,self.config.len_sent_context+1)]
-            padding_lengths_questions = [len([x for x in lengths_sent_questions if x>=t])
-                               for t in range(1,self.config.len_sent_questions+1)]
-            context_padding = [np.concatenate([np.identity(padding_lengths_context[i]),
-                                               np.zeros((padding_lengths_context[i],
-                                                         len(context) - padding_lengths_context[i]))],
-                                              1)
-                               for i in range(self.config.len_sent_context)]
-            questions_padding = [np.concatenate([np.identity(padding_lengths_questions[i]),
-                                                 np.zeros((padding_lengths_questions[i],
-                                                           len(questions) - padding_lengths_questions[i]))],
-                                                1)
-                               for i in range(self.config.len_sent_questions)]
             
             feed = {self.context_placeholder: context,
                     self.questions_placeholder: questions,
                     self.answers_placeholder: answers,
-                    self.output_gates_placeholder1: output_gates1,
-                    self.output_gates_placeholder2: output_gates2,
-                    self.output_placeholder: output,
+                    self.context_len_placeholder: lengths_sent_context,
+                    self.questions_len_placeholder: lengths_sent_questions,
+                    self.output_placeholder: output_padding,
                     self.dropout_placeholder: dp}
-            feed.update({k:v for k,v in [(self.context_padding[i], context_padding[i])
-                                         for i in range(self.config.len_sent_context)]})
-            feed.update({k:v for k,v in [(self.questions_padding[i], questions_padding[i])
-                                         for i in range(self.config.len_sent_questions)]})
 
             #Runs the model with forward pass (and backprop if train_op)
             loss, _, predictions = session.run(
@@ -457,6 +370,20 @@ class RNN_QAModel(QA_Model):
             sys.stdout.write('\r')
         return np.sum(total_loss) / num_answers, pos_preds / num_answers
 
+def weights_saver(saver, session, is_best):
+    print("Saving weights")
+    if not os.path.exists("./weights/current"):
+        os.makedirs("./weights/current")
+    if not os.path.exists("./weights/best"):
+        os.makedirs("./weights/best")
+
+    saver.save(session, "./weights/current/model.ckpt")
+
+    if is_best:
+        for f in os.listdir("./weights/current"):
+            copyfile(pjoin("./weights/current", f), pjoin("./weights/best", f))
+        
+
 def test_RNNQA():
     config = Config()
     with tf.variable_scope('RNNLM') as scope:
@@ -465,13 +392,18 @@ def test_RNNQA():
     init = tf.global_variables_initializer()
     saver = tf.train.Saver()
 
-    with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=10)) as session:
+    with tf.Session() as session:
         best_val_ce = float('inf')
         best_val_epoch = 0
     
         session.run(init)
         for epoch in range(config.max_epochs):
-            saver.restore(session, 'ptb_rnnlm.weights')
+            if epoch == 0:
+                try:    
+                    saver.restore(session, "./weights/current/model.ckpt")
+                except:
+                    pass
+
             print('Epoch {}'.format(epoch))
             start = time.time()
 
@@ -486,12 +418,15 @@ def test_RNNQA():
                 data_type=1)
             print('Validation cross-entropy: {}'.format(valid_ce))
             print('Validation accuracy: {}'.format(valid_accuracy))
-            saver.save(session, './ptb_rnnlm.weights')
             
             #Run additional epochs while cross-entropy improving on dev dataset
             if valid_ce < best_val_ce:
                 best_val_ce = valid_ce
                 best_val_epoch = epoch
+                weights_saver(saver, session, True)
+            else:
+                weights_saver(saver, session, False)
+
             if epoch - best_val_epoch > config.early_stopping:
                 break
             print('Total time: {}'.format(time.time() - start))
